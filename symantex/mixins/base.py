@@ -1,30 +1,49 @@
-"""
-Base definitions and helpers for all mixin classes.
-"""
+# File: symantex/mixins/base.py
 
 from sympy import default_sort_key, Basic
+from typing import Any, Tuple
+
 
 class PropertyMixin:
     """
     Marker base class for property mixins.
-    All mixin classes should inherit from this.
-
-    Provides common utility methods that mixins can leverage.
     """
-    def get_property_keys(self):
-        """Return the list of property keys attached to this instance, if any."""
-        return getattr(self, '_property_keys', [])
+
+    def get_property_keys(self) -> list[str]:
+        return getattr(self, "_property_keys", [])
+
+    def has_property(self, key: str) -> bool:
+        inst_keys = getattr(self, "_property_keys", None)
+        if inst_keys is not None and key in inst_keys:
+            return True
+
+        cls_keys = getattr(getattr(self, "func", None), "property_keys", None)
+        if cls_keys is not None and key in cls_keys:
+            return True
+
+        return False
+
+    def call_original(self, key: str, node: Any, *args, **kwargs) -> Any:
+        from symantex.registry import get_original_method
+
+        # First check for head.func.__orig_<method>
+        orig_attr = getattr(getattr(node, "func", None), f"__orig_{key}", None)
+        if orig_attr is not None:
+            return orig_attr(node, *args, **kwargs)
+
+        # Otherwise fetch from registry
+        try:
+            orig_method = get_original_method(key)
+        except KeyError:
+            raise RuntimeError(f"No original method stored for property '{key}'")
+        return orig_method(node, *args, **kwargs)
 
     @staticmethod
-    def sort_args(args):
-        """Return a tuple of args sorted in Sympy's canonical order."""
-        # Use Sympy's default_sort_key to sort
+    def sort_args(args: Tuple) -> Tuple:
         return tuple(sorted(args, key=default_sort_key))
 
     @classmethod
-    def wrap(cls, expr):
-        """Utility to re-wrap a Sympy expression in this class's constructor if needed."""
-        # Only attempt to wrap Sympy expressions
+    def wrap(cls, expr: Any) -> Any:
         if not isinstance(expr, Basic):
             return expr
         try:
@@ -32,38 +51,3 @@ class PropertyMixin:
         except Exception:
             return expr
 
-# Additional shared utility functions or abstract bases can be added here in the future.
-
-
-if __name__ == "__main__":
-    # Basic tests for PropertyMixin utilities
-    from sympy import symbols
-    # Test get_property_keys
-    class TestMixin(PropertyMixin):
-        pass
-
-    # Create a dummy instance and manually set _property_keys
-    inst = TestMixin()
-    inst._property_keys = ['a', 'b']
-    print(f"get_property_keys: {inst.get_property_keys()}")  # Expect ['a', 'b']
-
-    # Test sort_args: use unsorted symbols
-    x, y, z = symbols('z y x')
-    unsorted = (z, x, y)
-    sorted_args = PropertyMixin.sort_args(unsorted)
-    print(f"sort_args: {sorted_args}")  # Expect (x, y, z)
-
-    # Test wrap: wrapping a sympy expression
-    class WrapMixin(PropertyMixin, type(symbols('u'))):
-        def __new__(cls, expr):
-            # For testing, simply return the expression multiplied by 2
-            from sympy import Mul
-            return Mul(expr, 2)
-
-    expr = symbols('u')
-    wrapped = WrapMixin.wrap(expr)
-    print(f"wrap: {wrapped}")  # Expect 2*u
-    # If wrap should not apply to non-Sympy objects
-    non_expr = 123
-    wrapped_non = WrapMixin.wrap(non_expr)
-    print(f"wrap non-expression: {wrapped_non}")  # Expect 123
