@@ -19,33 +19,12 @@ class PullsIntegralMixin(PropertyMixin):
       Integral(F(u), x).doit()  →  F(Integral(u, x).doit())
     so if u = x**2, you get F(x**3/3).
     """
-    def _eval_integral(self, sym, **kwargs):
+    def _eval_Integral(self, sym, **kwargs):
         # For each argument, compute Integral(arg, sym).doit() and then call the function
         evaluated_args = []
         for arg in self.args:
             inner = Integral(arg, sym).doit()
             evaluated_args.append(inner)
-        return self.func(*evaluated_args)
-
-
-@register_property(
-    'pull_integral_unevaluated',
-    "Pull integral inside, but keep the result wrapped in UnevaluatedExpr."
-)
-class PullsIntegralUnevaluatedMixin(PropertyMixin):
-    """
-    Mixin that pulls the integral inside each argument, calls .doit() on it,
-    then wraps that result in UnevaluatedExpr so it will not be further simplified.
-
-    Example:
-      Integral(F(u), x).doit()  →  F(UnevaluatedExpr(Integral(u, x).doit()))
-    i.e. F(UnevaluatedExpr(x**3/3))
-    """
-    def _eval_integral(self, sym, **kwargs):
-        evaluated_args = []
-        for arg in self.args:
-            inner = Integral(arg, sym).doit()
-            evaluated_args.append(UnevaluatedExpr(inner))
         return self.func(*evaluated_args)
 
 
@@ -62,7 +41,7 @@ class DistributeIntegralMixin(PropertyMixin):
     Example:
       Integral(G(a, b), x).doit()  →  G(Integral(a, x).doit(), Integral(b, x).doit()).
     """
-    def _eval_integral(self, sym, **kwargs):
+    def _eval_Integral(self, sym, **kwargs):
         evaluated_args = [Integral(arg, sym).doit() for arg in self.args]
         return self.func(*evaluated_args)
 
@@ -91,14 +70,6 @@ if __name__ == "__main__":
     print(f"Integral(G(a, b), a): {expr2}")
     result2 = expr2.doit()
     print(f"Result after doit: {result2}")  # → G(a**2/2, b*a)
-
-    # 3) PullsIntegralUnevaluatedMixin for single argument
-    #    Expect: Integral(H(u), x).doit() → H(UnevaluatedExpr(x**3/3))
-    H = build_operator_class('H', ['pull_integral_unevaluated'], arity=1)
-    expr_u = Integral(H(u), x)
-    print(f"Integral(H(u), x): {expr_u}")
-    result_u = expr_u.doit()
-    print(f"Result after doit: {result_u}")  # → H(UnevaluatedExpr(x**3/3))
 
     # 4) DistributeIntegralMixin for two arguments
     #    Expect: Integral(K(a, b), a).doit() → K(a**2/2, b*a)

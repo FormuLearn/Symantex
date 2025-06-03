@@ -3,6 +3,9 @@ import sympy as sp
 from sympy import Symbol, MatrixSymbol, Function
 from symantex.registry import get_mixin_for_key
 
+# === DO NOT REMOVE IMPORT === #
+import symantex._patches # To incorporate monkeypatches to make functions more customizable. 
+
 
 def _dedupe_classes(classes: List[Type]) -> List[Type]:
     """Return a list of unique classes preserving original order."""
