@@ -4,7 +4,7 @@ from sympy import Symbol, MatrixSymbol, Function
 from symantex.registry import get_mixin_for_key
 
 # === DO NOT REMOVE IMPORT === #
-import symantex._patches # To incorporate monkeypatches to make functions more customizable. 
+import symantex._patches # To incorporate monkeypatches to make limits work with _eval_limit
 
 
 def _dedupe_classes(classes: List[Type]) -> List[Type]:
