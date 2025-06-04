@@ -2,145 +2,186 @@
 
 import functools
 import sympy
-from typing import Callable
-from symantex.registry import all_patch_specs, get_original_method
+from typing import Dict, List, Tuple, Type, Union, Callable
+from symantex.registry import all_patch_specs, store_original_method, get_original_method
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Generic wrapper factory (with debug prints)
+# We rebuild this mapping on each call to apply_all_patches().
+# It maps (SymClass, method_name) → list of (property_key, hook_name, head_attr).
+#
+# head_attr can now be either:
+#   - a string (the attribute name on 'self'), or
+#   - a callable f(self) → the “head” expression
 # ────────────────────────────────────────────────────────────────────────────────
-def _make_wrapper(key: str,
-                  SymClass: type,
-                  method_name: str,
-                  hook_name: str,
-                  head_extractor: Callable,
-                  arg_extractor: Callable):
-    """
-    Return a wrapper that replaces SymClass.method_name.
 
-    - key:            the property_key to check (instance or class).
-    - SymClass:       the Sympy class whose method is being overridden.
-    - method_name:    name of the method on SymClass (e.g. "doit").
-    - hook_name:      name of the mixin method to call (e.g. "_eval_limit").
-    - head_extractor: callable f(self) → head expression.
-    - arg_extractor:  callable f(self) → tuple of arguments to pass to the hook
-                      after the head.
+# (Reconstructed in apply_all_patches)
+_METHOD_PATCHES: Dict[
+    Tuple[Type, str],
+    List[Tuple[str, str, Union[str, Callable]]]
+] = {}
+
+
+def _build_method_patches():
     """
+    Reconstruct `_METHOD_PATCHES` from the current `all_patch_specs()`.
+    Each entry is (prop_key, SymClass, method_name, hook_name, head_attr).
+    """
+    global _METHOD_PATCHES
+    _METHOD_PATCHES = {}
+    for prop_key, SymClass, method_name, hook_name, head_attr in all_patch_specs():
+        key = (SymClass, method_name)
+        _METHOD_PATCHES.setdefault(key, []).append((prop_key, hook_name, head_attr))
+
+
+def _make_combined_wrapper(
+    SymClass: Type,
+    method_name: str,
+    specs: List[Tuple[str, str, Union[str, Callable]]]
+):
+    """
+    Create a single wrapper for `SymClass.method_name` that checks
+    all registered `(property_key, hook_name, head_attr)` in order.
+    """
+
     original_method = getattr(SymClass, method_name)
 
     @functools.wraps(original_method)
     def patched(self, *args, **kwargs):
-        # 1) Extract the head using head_extractor
-        head = head_extractor(self)
-
-        # 2) Gather property keys from instance or class
-        keys = []
-        if head is not None:
-            if hasattr(head, "property_keys"):
-                keys = getattr(head, "property_keys", [])
-            elif hasattr(head, "func") and hasattr(head.func, "property_keys"):
-                keys = getattr(head.func, "property_keys", [])
-
-        # Debug print
-        print(f"[PATCH-{key}] Called {SymClass.__name__}.{method_name} → head={head}, property_keys={keys}")
-
-        # 3) If key is present, invoke the mixin hook
-        if head is not None and key in keys:
-            hook = getattr(head.func, hook_name, None)
-            if hook is not None:
-                # Attach the original (unpatched) method to head.func, so mixins can call it:
+        # 1) Attempt to extract “head” (the inner operator/function) via head_attr.
+        head = None
+        for _, _, head_attr in specs:
+            if isinstance(head_attr, str):
+                if hasattr(self, head_attr):
+                    head = getattr(self, head_attr)
+                    break
+            else:
+                # assume head_attr is callable(self) -> expression
                 try:
-                    orig = get_original_method(key)
-                    setattr(head.func, f"__orig_{method_name}", orig)
+                    head = head_attr(self)
+                    break
+                except Exception:
+                    continue
+
+        # 2) If no head was found, just call the original method.
+        if head is None:
+            return original_method(self, *args, **kwargs)
+
+        # 3) Gather all property‐keys from:
+        #    a) instance‐level: head._property_keys
+        #    b) mixin on the class: head.func._property_keys
+        #    c) operator‐class: head.func.property_keys
+        prop_keys: List[str] = []
+        if hasattr(head, "_property_keys"):
+            prop_keys += getattr(head, "_property_keys", [])
+        if hasattr(head, "func") and hasattr(head.func, "_property_keys"):
+            prop_keys += getattr(head.func, "_property_keys", [])
+        if hasattr(head, "func") and hasattr(head.func, "property_keys"):
+            prop_keys += getattr(head.func, "property_keys", [])
+
+
+        # 4) Iterate through each patch spec in registration order
+        for prop_key, hook_name, head_attr in specs:
+            if prop_key in prop_keys:
+                # We found a matching property-key
+                head2 = None
+                if isinstance(head_attr, str):
+                    head2 = getattr(self, head_attr, None)
+                else:
+                    head2 = head_attr(self)
+
+                hook = getattr(head2.func, hook_name, None)
+                if hook is None:
+                    continue  # this mixin has no _eval_* for this SymClass
+
+                # Attach the original unpatched method under "__orig_{method_name}"
+                try:
+                    orig = get_original_method(prop_key)
+                    setattr(head2.func, f"__orig_{method_name}", orig)
                 except KeyError:
-                    # If no original is registered, do nothing
                     pass
 
-                hook_args = arg_extractor(self)
-                print(f"[PATCH-{key}] Key found; calling hook {hook_name} with args={hook_args}")
-                return hook(head, *hook_args, **kwargs)
-            else:
-                print(f"[PATCH-{key}] Hook {hook_name} not found on {head.func}")
+                # Build hook_args depending on the SymClass
+                if SymClass is sympy.Derivative:
+                    deriv_arg = self.args[1]
+                    if isinstance(deriv_arg, tuple):
+                        var = deriv_arg[0]
+                    else:
+                        var = deriv_arg
+                    hook_args = (var,)
+                elif SymClass is sympy.Limit:
+                    _, var, point, direction = self.args
+                    hook_args = (var, point, direction)
+                else:
+                    hook_args = ()
 
-        # 4) Key not present or hook missing → return self unevaluated
-        print(f"[PATCH-{key}] Key not in property_keys; returning self unevaluated\n")
-        return self
+                return hook(head2, *hook_args, **kwargs)
+
+
+        # 5) No patch‐key matched. If `head.func` has ANY attribute "property_keys",
+        #    that means it’s a “custom operator,” so return `self` (unevaluated).
+        if hasattr(head, "func") and hasattr(head.func, "property_keys"):
+            return self
+
+        return original_method(self, *args, **kwargs)
 
     return patched
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Install all registered patches at import time
-# ────────────────────────────────────────────────────────────────────────────────
 def apply_all_patches():
     """
-    Iterate over all registered patch specs and install each wrapper.
-    After this is called, Sympy methods only perform custom behavior
-    if head.property_keys (instance or class) contains the corresponding key;
-    otherwise, the node is returned unevaluated.
+    1) Rebuild the patch‐spec mapping from all_patch_specs()
+    2) For each (SymClass, method_name), store the original method under each prop_key
+    3) Install a combined wrapper for that SymClass.method_name
     """
-    for (
-        key,
-        SymClass,
-        method_name,
-        hook_name,
-        head_extractor,
-        arg_extractor
-    ) in all_patch_specs():
-        if hasattr(SymClass, method_name):
-            wrapper = _make_wrapper(
-                key, SymClass, method_name, hook_name, head_extractor, arg_extractor
-            )
-            setattr(SymClass, method_name, wrapper)
+    _build_method_patches()
+
+    for (SymClass, method_name), specs in _METHOD_PATCHES.items():
+        original = getattr(SymClass, method_name)
+        from symantex.registry import store_original_method
+        for prop_key, _, _ in specs:
+            store_original_method(prop_key, original)
+
+        wrapper = _make_combined_wrapper(SymClass, method_name, specs)
+        setattr(SymClass, method_name, wrapper)
 
 
-# Execute patching immediately upon import
+# Apply patches immediately upon import
 apply_all_patches()
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Self‐test block to verify the generic patch system (with extra prints)
+# Self‐test block (for debugging)
 # ────────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sympy
     from sympy import Symbol, Limit, Derivative
-    from symantex.registry import register_property, register_patch, get_original_method
+    from symantex.registry import register_property, register_patch
     from symantex.factory import build_operator_class
     from symantex.mixins.base import PropertyMixin
 
-    # --------------------------------------
-    # 1) Test case for pull_limit
-    # --------------------------------------
+    # 1) Test pull_limit
     @register_property(
         "test_limit",
         "Example mixin: pull limit inside function."
     )
     class TestLimitMixin(PropertyMixin):
         def _eval_limit(self, var, point, direction):
-            # Retrieve the unpatched Limit.doit from the registry
             orig_doit = getattr(self.func, "__orig_doit", None)
             if orig_doit is None:
-                # As a fallback—if the registry somehow didn’t store one—fetch it directly:
-                orig_doit = get_original_method("test_limit")
+                return sympy.Limit(self, var, point, direction)
 
-            # Build a fresh Limit node on the inner expression
-            inner_node = sympy.Limit(self.args[0], var, point, direction)
-            # Invoke the original method so that x**2 → 0, not an unevaluated Limit
-            inner_val = orig_doit(inner_node)
-            return self.func(inner_val)
+            inner = sympy.Limit(self.args[0], var, point, direction)
+            val = orig_doit(inner)
+            return self.func(val)
 
-    # Register patch spec for Limit.doit:
-    # head_extractor:  lambda self: self.args[0]       (the function inside Limit)
-    # arg_extractor:   lambda self: (var, point, dir)  from self.args[1..3]
+    # Now use a **callable** for head_attr:
     register_patch(
         "test_limit",
         sympy.Limit,
         "doit",
         "_eval_limit",
-        lambda self: self.args[0],
-        lambda self: (self.args[1], self.args[2], self.args[3])
+        lambda self: self.args[0]   # ← because Limit(expr, …).args[0] is the head
     )
-
-    # Re‐apply patches so our new entry takes effect
     apply_all_patches()
 
     x = Symbol("x")
@@ -151,43 +192,34 @@ if __name__ == "__main__":
 
     expr_F = Limit(F(x**2), x, 0, "+")
     result_F = expr_F.doit()
-    print(f"Result for F with test_limit: {result_F}\n")  # → F(0)
+    print(f"\nResult for F w/ test_limit: {result_F}\n")      # → F(0)
 
     expr_G = Limit(G(x**2), x, 0, "+")
     result_G = expr_G.doit()
-    print(f"Result for G without test_limit: {result_G}\n")  # → Limit(G(x**2), x, 0)
+    print(f"\nResult for G w/out test_limit: {result_G}\n")   # → Limit(G(x^2), x, 0)
 
-    # --------------------------------------
-    # 2) Test case for pull_derivative_chain
-    # --------------------------------------
+    # 2) Test pull_derivative_chain
     @register_property(
         "test_deriv",
         "Example mixin: pull derivative inside function."
     )
     class TestDerivMixin(PropertyMixin):
         def _eval_derivative(self, var):
-            # Retrieve the unpatched Derivative.doit from registry
             orig_doit = getattr(self.func, "__orig_doit", None)
             if orig_doit is None:
-                orig_doit = get_original_method("test_deriv")
+                return sympy.Derivative(self, var)
 
-            inner_node = sympy.Derivative(self.args[0], var)
-            inner_val = orig_doit(inner_node)
-            return self.func(inner_val)
+            inner = sympy.Derivative(self.args[0], var)
+            val = orig_doit(inner)
+            return self.func(val)
 
-    # Register patch spec for Derivative.doit:
-    # head_extractor:  lambda self: self.args[0]
-    # arg_extractor:   lambda self: (var,)
     register_patch(
         "test_deriv",
         sympy.Derivative,
         "doit",
         "_eval_derivative",
-        lambda self: self.args[0],
-        lambda self: (self.args[1],)
+        lambda self: self.args[0]   # ← because Derivative(expr, var).args[0] is the head
     )
-
-    # Re‐apply patches so our new entry takes effect
     apply_all_patches()
 
     print("\n=== Running Derivative tests ===\n")
@@ -196,10 +228,10 @@ if __name__ == "__main__":
 
     expr_H = Derivative(H(x**3), x)
     result_H = expr_H.doit()
-    print(f"Result for H with test_deriv: {result_H}\n")  # → H(3*x**2)
+    print(f"\nResult for H w/ test_deriv: {result_H}")   # → H(3*x**2)
 
     expr_K = Derivative(K(x**3), x)
     result_K = expr_K.doit()
-    print(f"Result for K without test_deriv: {result_K}\n")  # → Derivative(K(x**3), x)
+    print(f"\nResult for K w/out test_deriv: {result_K}\n")# → Derivative(K(x^3), x)
 
-    print("All generic‐patch tests completed.")
+    print("\nAll generic‐patch tests completed.")
