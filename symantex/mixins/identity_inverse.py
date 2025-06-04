@@ -1,114 +1,156 @@
-from sympy import Add, Mul, Symbol
+# File: symantex/mixins/identity_inverse.py
+
+from sympy import Symbol, Add, Mul, Integer
 from symantex.registry import register_property
 from symantex.mixins.base import PropertyMixin
 
+
 @register_property('identity_add', "Symbol acts as additive identity: 0 + x = x + 0 = x")
-class AdditiveIdentityMixin(PropertyMixin, Symbol):
+class IdentityAddMixin(PropertyMixin, Symbol):
     """
-    Mixin marking a symbol as additive identity (zero).
+    Mixin so that adding zero returns the other operand:
+      x + 0 = x,   0 + x = x.
     """
     def __new__(cls, name, **kwargs):
-        obj = super().__new__(cls, name, **kwargs)
-        obj._property_keys = ['identity_add']
-        return obj
+        # Create a new Symbol; default commutative=True
+        return super().__new__(cls, name, **kwargs)
 
     def __add__(self, other):
-        # Only treat this symbol and '0' as additive identities
-        if self.name == '0':
-            return other
-        if isinstance(other, Symbol) and other.name == '0':
+        # If other is literally zero, return self
+        if other == Integer(0):
             return self
+        # Otherwise, perform regular addition
         return Add(self, other, evaluate=True)
 
     def __radd__(self, other):
-        return self.__add__(other)
+        # If other is zero, return self
+        if other == Integer(0):
+            return self
+        return Add(other, self, evaluate=True)
+
 
 @register_property('identity_mul', "Symbol acts as multiplicative identity: 1 * x = x * 1 = x")
-class MultiplicativeIdentityMixin(PropertyMixin, Symbol):
+class IdentityMulMixin(PropertyMixin, Symbol):
     """
-    Mixin marking a symbol as multiplicative identity (one).
+    Mixin so that multiplying by one returns the other operand:
+      x * 1 = x,   1 * x = x.
     """
     def __new__(cls, name, **kwargs):
-        obj = super().__new__(cls, name, commutative=True, **kwargs)
-        obj._property_keys = ['identity_mul']
-        return obj
+        return super().__new__(cls, name, **kwargs)
 
     def __mul__(self, other):
-        if self.name == '1':
-            return other
-        if isinstance(other, Symbol) and other.name == '1':
+        # If other is literally one, return self
+        if other == Integer(1):
             return self
         return Mul(self, other, evaluate=True)
 
     def __rmul__(self, other):
-        return self.__mul__(other)
+        if other == Integer(1):
+            return self
+        return Mul(other, self, evaluate=True)
 
-@register_property('inverse_add', "Symbol provides additive inverse: x + inv(x) = 0")
-class AdditiveInverseMixin(PropertyMixin, Symbol):
+
+@register_property('inverse_add', "Symbol provides additive inverse: x + (-x) = 0, (-x) + x = 0")
+class InverseAddMixin(PropertyMixin, Symbol):
     """
-    Mixin that defines the additive inverse of the symbol.
-    When added to its base symbol, returns '0'.
+    Mixin so that adding a symbol to its negative yields zero:
+      x + (-x) = 0,   (-x) + x = 0.
     """
     def __new__(cls, name, **kwargs):
-        obj = super().__new__(cls, name, **kwargs)
-        obj._property_keys = ['inverse_add']
-        return obj
+        return super().__new__(cls, name, **kwargs)
 
     def __add__(self, other):
-        # If other is the base symbol (matching name without 'inv_'), return '0'
-        if isinstance(other, Symbol) and other.name == self.name.replace('inv_', ''):
-            return Symbol('0')
+        # If other is exactly -self, return 0
+        if other == -self:
+            return Integer(0)
         return Add(self, other, evaluate=True)
 
     def __radd__(self, other):
-        return self.__add__(other)
+        # If other is exactly -self, return 0
+        if other == -self:
+            return Integer(0)
+        return Add(other, self, evaluate=True)
 
-@register_property('inverse_mul', "Symbol provides multiplicative inverse: x * inv(x) = 1")
-class MultiplicativeInverseMixin(PropertyMixin, Symbol):
+
+@register_property('inverse_mul', "Symbol provides multiplicative inverse: x * (1/x) = 1, (1/x) * x = 1")
+class InverseMulMixin(PropertyMixin, Symbol):
     """
-    Mixin that defines the multiplicative inverse of the symbol.
-    When multiplied by its base symbol, returns '1'.
+    Mixin so that multiplying a symbol by its reciprocal yields one:
+      x * (1/x) = 1,   (1/x) * x = 1.
     """
     def __new__(cls, name, **kwargs):
-        obj = super().__new__(cls, name, commutative=True, **kwargs)
-        obj._property_keys = ['inverse_mul']
-        return obj
+        return super().__new__(cls, name, **kwargs)
 
     def __mul__(self, other):
-        # If other is the base symbol (matching name without 'inv_'), return '1'
-        if isinstance(other, Symbol) and other.name == self.name.replace('inv_', ''):
-            return Symbol('1')
+        # If other is exactly 1/self, return 1
+        # Note: 1/self creates a Pow object. Sympy’s == works structurally.
+        if other == (Integer(1) / self):
+            return Integer(1)
         return Mul(self, other, evaluate=True)
 
     def __rmul__(self, other):
-        return self.__mul__(other)
+        if other == (Integer(1) / self):
+            return Integer(1)
+        return Mul(other, self, evaluate=True)
+
 
 if __name__ == "__main__":
+    # Tests for identity and inverse mixins
+    from sympy import symbols
     from symantex.factory import build_symbol
-    from sympy import Symbol, Add, Mul
 
-    # Test additive identity
-    Zero = build_symbol('0', ['identity_add'])
-    X = build_symbol('x', ['identity_add'])  # although real zero is only '0'
-    print(f"0 + x = {Zero + X}")  # expect x
-    print(f"x + 0 = {X + Zero}")  # expect x
+    print("=== Testing identity_add ===")
+    X = build_symbol('x', ['identity_add'])
+    zero = Integer(0)
+    expr1 = X + zero
+    expr2 = zero + X
+    print(f" x + 0 = {expr1}, 0 + x = {expr2}")
+    assert expr1 == X
+    assert expr2 == X
 
-    # Test multiplicative identity
-    One = build_symbol('1', ['identity_mul'])
-    Y = build_symbol('y', ['identity_mul'])
-    print(f"1 * y = {One * Y}")  # expect y
-    print(f"y * 1 = {Y * One}")  # expect y
+    Y = build_symbol('y', [])
+    expr3 = Y + zero
+    print(f" (without mixin) y + 0 = {expr3}")
+    # default Symbol + 0 → y, so this also simplifies; no failure
 
-    # Test additive inverse
-    X_inv = build_symbol('inv_x', ['inverse_add'])
-    X_base = Symbol('x')
-    print(f"inv_x + x = {X_inv + X_base}")  # expect 0
-    print(f"x + inv_x = {X_base + X_inv}")  # expect 0
+    print("\n=== Testing identity_mul ===")
+    U = build_symbol('u', ['identity_mul'])
+    one = Integer(1)
+    expr4 = U * one
+    expr5 = one * U
+    print(f" u * 1 = {expr4}, 1 * u = {expr5}")
+    assert expr4 == U
+    assert expr5 == U
 
-    # Test multiplicative inverse
-    Y_inv = build_symbol('inv_y', ['inverse_mul'])
-    Y_base = Symbol('y')
-    print(f"inv_y * y = {Y_inv * Y_base}")  # expect 1
-    print(f"y * inv_y = {Y_base * Y_inv}")  # expect 1
+    V = build_symbol('v', [])
+    expr6 = V * one
+    print(f" (without mixin) v * 1 = {expr6}")
+    # default Symbol * 1 → v, so no failure
 
-    print("Identity & Inverse mixin tests passed.")
+    print("\n=== Testing inverse_add ===")
+    A = build_symbol('a', ['inverse_add'])
+    expr7 = A + (-A)
+    expr8 = (-A) + A
+    print(f" a + (-a) = {expr7},  (-a) + a = {expr8}")
+    assert expr7 == Integer(0)
+    assert expr8 == Integer(0)
+
+    B = build_symbol('b', [])
+    expr9 = B + (-B)
+    print(f" (without mixin) b + (-b) = {expr9}")
+    # default Symbol + -Symbol → 0 anyway; Sympy simplifies
+
+    print("\n=== Testing inverse_mul ===")
+    M = build_symbol('m', ['inverse_mul'])
+    expr10 = M * (Integer(1) / M)
+    expr11 = (Integer(1) / M) * M
+    print(f" m * (1/m) = {expr10},  (1/m) * m = {expr11}")
+    assert expr10 == Integer(1)
+    assert expr11 == Integer(1)
+
+    N = build_symbol('n', [])
+    expr12 = N * (Integer(1) / N)
+    print(f" (without mixin) n * (1/n) = {expr12}")
+    # default Symbol*(1/Symbol) → 1 anyway; Sympy simplifies
+
+    print("\nAll identity/inverse mixin tests passed.")

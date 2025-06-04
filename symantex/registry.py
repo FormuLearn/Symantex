@@ -3,9 +3,15 @@
 from typing import Callable, Dict, List, Tuple, Type
 from symantex.mixins.base import PropertyMixin
 
-# Each PatchSpec now includes:
-#   (SympyClass, method_name, hook_name, head_extractor, arg_extractor)
-PatchSpec = Tuple[Type, str, str, Callable, Callable]
+# A patch specification needs five pieces:
+#   1. property_key        (e.g. "pull_limit")
+#   2. SympyClass          (e.g. sympy.series.limits.Limit)
+#   3. method_name         (e.g. "doit")
+#   4. hook_name           (e.g. "_eval_limit" on the mixin)
+#   5. head_attr           (how to get the head from 'self', e.g. "function" or "expr")
+#
+# We'll store patch specs internally as a dict: key -> List[PatchSpec]
+PatchSpec = Tuple[Type, str, str, str]  # (SympyClass, method_name, hook_name, head_attr)
 
 
 class PropertyRegistry:
@@ -13,36 +19,65 @@ class PropertyRegistry:
     Singleton registry mapping property keys to:
       (description, mixin_class, [patch_specs], original_method)
 
-    - _registry[key]          = (description, mixin_class)
-    - _patch_registry[key]    = list of PatchSpec
-    - _original_methods[key]  = original, unpatched SympyClass.method_name
+    Where:
+      - _registry[key] = (description, mixin_class)
+      - _patch_registry[key] = list of PatchSpec tuples
+      - _originals[key] = the original un-patched method for that key (Callable)
     """
     _instance = None
 
     _registry: Dict[str, Tuple[str, Type]]
     _patch_registry: Dict[str, List[PatchSpec]]
-    _original_methods: Dict[str, Callable]
+    _originals: Dict[str, Callable]
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(PropertyRegistry, cls).__new__(cls)
+            # key -> (description, mixin_class)
             cls._instance._registry = {}
+            # key -> List[PatchSpec]
             cls._instance._patch_registry = {}
-            cls._instance._original_methods = {}
+            # key -> original method (before patching)
+            cls._instance._originals = {}
         return cls._instance
 
     def register(self, key: str, description: str, mixin_class: Type) -> None:
         """
         Register a mixin class under a given property key.
         Raises if mixin_class is not a subclass of PropertyMixin, or if key already exists.
+
+        As part of registration, wrap mixin_class.__new__ so that every new instance
+        has this property 'key' appended into its `_property_keys` list.
         """
         if not issubclass(mixin_class, PropertyMixin):
             raise TypeError(f"Mixin class '{mixin_class.__name__}' must inherit from PropertyMixin.")
         if key in self._registry:
             raise KeyError(f"Property key '{key}' is already registered.")
+
+        # 1) Store description and mixin_class
         self._registry[key] = (description, mixin_class)
+        # 2) Initialize empty patch list
         self._patch_registry[key] = []
-        # Initially, no original method is stored. It will be set in register_patch.
+        # 3) Initialize “original” slot to None; it will be set when we actually patch
+        self._originals[key] = None
+
+        # 4) Wrap the mixin_class.__new__ so that every instance of mixin_class
+        #    automatically has 'key' appended to its `_property_keys` list.
+        orig_new = mixin_class.__new__
+
+        def wrapped_new(cls, *args, **kwargs):
+            # Call the original __new__ (which may return an instance)
+            obj = orig_new(cls, *args, **kwargs)
+
+            # Append `key` to its existing list (if any), or create a new list.
+            if hasattr(obj, "_property_keys"):
+                existing = getattr(obj, "_property_keys", [])
+                obj._property_keys = existing + [key]
+            else:
+                setattr(obj, "_property_keys", [key])
+            return obj
+
+        mixin_class.__new__ = staticmethod(wrapped_new)
 
     def register_patch(
         self,
@@ -50,35 +85,45 @@ class PropertyRegistry:
         sympy_class: Type,
         method_name: str,
         hook_name: str,
-        head_extractor: Callable,
-        arg_extractor: Callable
+        head_attr: str
     ) -> None:
         """
         Associate a monkey-patch spec with an existing property key.
 
-        patch_spec = (
-            SympyClass,
-            method_to_override,
-            hook_method_on_mixin,
-            head_extractor,
-            arg_extractor
-        )
+        patch_spec = (SympyClass, method_to_override, hook_method_on_mixin, head_attr)
 
-        When this is called, we also capture SympyClass.method_name and store
-        it as the "original" unpatched method for later retrieval.
+        head_attr is a string: the attribute name on 'self' where the head lives.
+          - For Limit.doit: head_attr = "function"
+          - For Derivative.doit: head_attr = "expr"
+          - For Integral.doit: head_attr = "function"
+          - For Sum.doit: head_attr = "function"
         """
         if key not in self._registry:
             raise KeyError(f"Cannot register patch for unknown property key '{key}'.")
+        self._patch_registry[key].append((sympy_class, method_name, hook_name, head_attr))
 
-        # Capture the original method if not already done
-        if key not in self._original_methods:
-            orig = getattr(sympy_class, method_name)
-            self._original_methods[key] = orig
+    def store_original_method(self, key: str, original: Callable) -> None:
+        """
+        Save the original (unpatched) method for property 'key'.
+        This must be called exactly once, just before we actually overwrite it.
+        """
+        if key not in self._registry:
+            raise KeyError(f"Cannot store original for unknown property key '{key}'.")
+        # Only store if not already set
+        if self._originals[key] is None:
+            self._originals[key] = original
 
-        # Append the patch spec
-        self._patch_registry[key].append(
-            (sympy_class, method_name, hook_name, head_extractor, arg_extractor)
-        )
+    def get_original_method(self, key: str) -> Callable:
+        """
+        Retrieve the original un-patched method for property 'key'.
+        Raises if no original was stored.
+        """
+        if key not in self._registry:
+            raise KeyError(f"No such property key '{key}'.")
+        orig = self._originals[key]
+        if orig is None:
+            raise KeyError(f"No original method stored for property key '{key}'.")
+        return orig
 
     def get_mixin_for_key(self, key: str) -> Type:
         """Return the mixin class for a given property key."""
@@ -94,44 +139,29 @@ class PropertyRegistry:
         except KeyError:
             raise KeyError(f"Property key '{key}' is not registered.")
 
-    def get_original_method(self, key: str) -> Callable:
-        """
-        Return the original (unpatched) Sympy method for this property key.
-        E.g. for "pull_limit" it returns the real Limit.doit, even after patching.
-        Raises if no original was captured or key is unknown.
-        """
-        try:
-            return self._original_methods[key]
-        except KeyError:
-            raise KeyError(f"No original method stored for property key '{key}'.")
-
     def all_registered_properties(self) -> Dict[str, str]:
         """Return a dict mapping property_key -> description."""
         return {key: desc for key, (desc, _) in self._registry.items()}
 
-    def all_patch_specs(self) -> List[Tuple[str, Type, str, str, Callable, Callable]]:
+    def all_patch_specs(self) -> List[Tuple[str, Type, str, str, str]]:
         """
         Return a flat list of all registered patch specs in the form:
-          (property_key, SympyClass, method_name, hook_name, head_extractor, arg_extractor)
+          (property_key, SympyClass, method_name, hook_name, head_attr)
         """
-        specs: List[Tuple[str, Type, str, str, Callable, Callable]] = []
+        specs: List[Tuple[str, Type, str, str, str]] = []
         for key, patch_list in self._patch_registry.items():
-            for (SymClass, mname, hook, head_ex, arg_ex) in patch_list:
-                specs.append((key, SymClass, mname, hook, head_ex, arg_ex))
+            for (SymClass, mname, hook, head_attr) in patch_list:
+                specs.append((key, SymClass, mname, hook, head_attr))
         return specs
 
 
-# Module‐level registry instance
+# Module-level registry instance
 _registry = PropertyRegistry()
 
 
 def register_property(key: str, description: str) -> Callable:
     """
     Decorator to register a mixin class under a given property key.
-    Usage:
-        @register_property("pull_limit", "description…")
-        class PullsLimitMixin(PropertyMixin):
-            …
     """
     def decorator(mixin_class: Type) -> Type:
         _registry.register(key, description, mixin_class)
@@ -144,45 +174,50 @@ def register_patch(
     sympy_class: Type,
     method_name: str,
     hook_name: str,
-    head_extractor: Callable,
-    arg_extractor: Callable
+    head_attr: str
 ) -> None:
     """
     Convenience function to register a patch spec for an existing property key.
-
     Example:
       register_patch(
           "pull_limit",
           sympy.series.limits.Limit,
           "doit",
           "_eval_limit",
-          lambda self: self.args[0],                # head = inner function
-          lambda self: (self.args[1],                # var
-                        self.args[2],                # point
-                        self.args[3])                # direction
+          "function"
       )
     """
-    _registry.register_patch(key, sympy_class, method_name, hook_name, head_extractor, arg_extractor)
+    _registry.register_patch(key, sympy_class, method_name, hook_name, head_attr)
+
+
+def store_original_method(key: str, original: Callable) -> None:
+    """
+    Convenience wrapper around PropertyRegistry.store_original_method.
+    """
+    _registry.store_original_method(key, original)
+
+
+def get_original_method(key: str) -> Callable:
+    """
+    Convenience wrapper around PropertyRegistry.get_original_method.
+    """
+    return _registry.get_original_method(key)
 
 
 def get_mixin_for_key(key: str) -> Type:
     return _registry.get_mixin_for_key(key)
 
 
-def get_original_method(key: str) -> Callable:
-    return _registry.get_original_method(key)
-
-
 def all_registered_properties() -> Dict[str, str]:
     return _registry.all_registered_properties()
 
 
-def all_patch_specs() -> List[Tuple[str, Type, str, str, Callable, Callable]]:
+def all_patch_specs() -> List[Tuple[str, Type, str, str, str]]:
     return _registry.all_patch_specs()
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Self‐test block for registry
+# Self-test block for registry
 # ────────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sympy
@@ -190,10 +225,14 @@ if __name__ == "__main__":
 
     # Dummy mixin classes
     class DummyMixinA(PropertyMixin):
+        # no explicit __new__ override
         pass
 
     class DummyMixinB(PropertyMixin):
-        pass
+        # explicit __new__ override
+        def __new__(cls, x):
+            inst = super().__new__(cls, x)
+            return inst
 
     # 1) Register two properties
     reg = PropertyRegistry()
@@ -211,27 +250,13 @@ if __name__ == "__main__":
 
     # 2) Attempt to register a patch for an unknown key
     try:
-        register_patch(
-            "unknown_key",
-            sympy.Add,
-            "doit",
-            "_eval_add_stub",
-            lambda self: None,
-            lambda self: ()
-        )
+        register_patch("unknown_key", sympy.Add, "doit", "_eval_add_stub", "args")
     except KeyError as e:
         print(f"Correctly caught attempt to patch unknown key: {e}")
 
     # 3) Register a patch spec for "test_a"
     try:
-        register_patch(
-            "test_a",
-            sympy.Add,
-            "__new__",
-            "_eval_add_stub",
-            lambda self: None,
-            lambda self: ()
-        )
+        register_patch("test_a", sympy.Add, "__new__", "_eval_add_stub", "args")
         print("Registered patch spec for test_a.")
     except Exception as e:
         print(f"Failed to register patch spec for test_a: {e}")
@@ -246,12 +271,13 @@ if __name__ == "__main__":
     specs = all_patch_specs()
     print("All patch specs:", specs)
 
-    # 5) Access the original method for "test_a"
+    # 5) Now store an “original” method for test_a, then retrieve it
     try:
+        store_original_method("test_a", sympy.Add.__new__)
         orig = get_original_method("test_a")
-        print(f"Original method for test_a: {orig}")
-    except KeyError as e:
-        print(f"No original for test_a yet: {e}")
+        print(f"Original for test_a: {orig}")
+    except Exception as e:
+        print(f"Error with get_original_method: {e}")
 
     # 6) Using decorator to register another property
     @register_property("test_c", "Test property C")
@@ -261,9 +287,9 @@ if __name__ == "__main__":
     print(f"Using decorator, registered test_c: {get_mixin_for_key('test_c').__name__}")
     print(f"All registered properties after decorator: {all_registered_properties()}")
 
-    # 7) test_c should have no patches or originals yet
-    try:
-        orig_c = get_original_method("test_c")
-        print(f"Original method for test_c: {orig_c}")
-    except KeyError as e:
-        print(f"No original for test_c (as expected): {e}")
+    # 7) Verify that __new__ was wrapped:
+    inst_a = DummyMixinA()    # original __new__ returned an object
+    print(f"inst_a._property_keys (should contain 'test_a'): {inst_a._property_keys}")
+
+    inst_c = DummyMixinC()    # wrapper __new__ should have appended 'test_c'
+    print(f"inst_c._property_keys (should contain 'test_c'): {inst_c._property_keys}")
