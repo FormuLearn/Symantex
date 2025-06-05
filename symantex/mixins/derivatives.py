@@ -175,11 +175,23 @@ if __name__ == "__main__":
     # 8) Ternary chain‐rule (arity=3)
     H = build_operator_class('H', ['pull_derivative_chain'], arity=3)
     expr_H = Derivative(H(a**2, b**2, c**2), b)
-    # Expected: H(0, 2*b, c^2) + H(a^2, 0, c^2) + H(a^2, b^2, 0)
-    expected_H = H(Integer(0), 2*b, c**2) + H(a**2, Integer(0), c**2) + H(a**2, b**2, Integer(0))
+
+    # Correct expected terms:
+    expected_terms = {
+        H(Integer(0),   b**2,     c**2),    # derivative of a^2 is 0
+        H(a**2,         2*b,      c**2),    # derivative of b^2 is 2*b
+        H(a**2,         b**2,     Integer(0))  # derivative of c^2 is 0
+    }
+
     result_H = expr_H.doit()
-    print(f"Derivative(H(a^2, b^2, c^2), b) → {result_H}  (expected {expected_H})")
-    assert result_H == expected_H
+    print(
+        f"Derivative(H(a^2, b^2, c^2), b) → {result_H}\n"
+        f"Expected (unordered) = {expected_terms}"
+    )
+
+    result_terms = set(result_H.args) if isinstance(result_H, Add) else {result_H}
+    assert result_terms == expected_terms
+
 
     # 9) Wrong arity: operator R has pull_derivative_chain but arity=0
     R = build_operator_class('R', ['pull_derivative_chain'], arity=0)
