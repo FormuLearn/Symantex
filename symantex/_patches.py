@@ -111,6 +111,13 @@ def _make_combined_wrapper(
                 elif SymClass is sympy.Limit:
                     _, var, point, direction = self.args
                     hook_args = (var, point, direction)
+                elif SymClass is sympy.Integral:
+                    ivar = self.args[1]
+                    if isinstance(ivar, tuple):
+                        var = ivar[0]
+                    else:
+                        var = ivar
+                    hook_args = (var,)
                 else:
                     hook_args = ()
 
