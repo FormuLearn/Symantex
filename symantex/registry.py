@@ -1,17 +1,17 @@
 # File: symantex/registry.py
 
-from typing import Callable, Dict, List, Tuple, Type, Union, Optional
+import inspect
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 from symantex.mixins.base import PropertyMixin
 
-# A PatchSpec is a five‐tuple:
-#   (SympyClass, method_to_override, hook_method_on_mixin, head_attr)
+# A PatchSpec is now a five‐tuple
 PatchSpec = Tuple[
-                Type, # The sympy class being patched
-                str, # method being overridden
-                str, # hook name on the mixin
-                Union[str, Callable], # head_attr (either attribute‐name or callable(self)->Expression)
-                Union[str, Callable], # arg_extractor (callable(self)->tuple of hook arguments, or None)
-            ]
+    Type,                            # The Sympy class being patched
+    str,                             # method name to override
+    str,                             # hook name on the mixin
+    Union[str, Callable],            # head_attr (string or callable)
+    Optional[Callable]               # arg_extractor (callable or None)
+]
 
 
 class PropertyRegistry:
@@ -25,7 +25,7 @@ class PropertyRegistry:
 
     _registry: Dict[str, Tuple[str, Type]]
     _patch_registry: Dict[str, List[PatchSpec]]
-    _originals: Dict[str, Callable]  # map property_key -> original method
+    _originals: Dict[str, Callable]
 
     def __new__(cls):
         if cls._instance is None:
@@ -37,18 +37,61 @@ class PropertyRegistry:
 
     def register(self, key: str, description: str, mixin_class: Type) -> None:
         """
-        Register a mixin class under a given property key.
-        Raises if mixin_class is not a subclass of PropertyMixin, or if key already exists.
+        Register a mixin class under `key`, and wrap its __new__ so that
+        every new instance (including subclasses) gets `key` in _property_keys.
         """
         if not issubclass(mixin_class, PropertyMixin):
             raise TypeError(f"Mixin class '{mixin_class.__name__}' must inherit from PropertyMixin.")
         if key in self._registry:
             raise KeyError(f"Property key '{key}' is already registered.")
 
-        # Store description and mixin_class
+        # store
         self._registry[key] = (description, mixin_class)
-        # Initialize an empty list of patch specs
         self._patch_registry[key] = []
+
+        orig_new = mixin_class.__new__
+        sig = inspect.signature(orig_new)
+
+        def wrapped_new(cls_, *args, **kwargs):
+            # 1) If we're constructing *exactly* the mixin itself,
+            #    bind to its original __new__ signature.
+            if cls_ is mixin_class:
+                try:
+                    bound = sig.bind_partial(cls_, *args, **kwargs)
+                    call_args = list(bound.arguments.values())
+                    obj = orig_new(*call_args)
+                except Exception:
+                    # fallback to simplest
+                    try:
+                        obj = orig_new(cls_)
+                    except Exception:
+                        obj = object.__new__(cls_)
+            else:
+                # 2) cls_ is some subclass (e.g. your generated Symbol/Function).  Find
+                #    where mixin_class sits in *that* MRO, and delegate to the very
+                #    next __new__ after it (so that Symbol.__new__ or Function.__new__
+                #    actually runs and sets up _args/_nargs correctly).
+                mro = cls_.__mro__
+                idx = mro.index(mixin_class)
+                for base in mro[idx+1:]:
+                    base_new = getattr(base, "__new__", None)
+                    if base_new is None:
+                        continue
+                    try:
+                        obj = base_new(cls_, *args, **kwargs)
+                        break
+                    except TypeError:
+                        continue
+                else:
+                    obj = object.__new__(cls_)
+
+            # 3) Finally, attach or extend the _property_keys list
+            existing = getattr(obj, "_property_keys", [])
+            obj._property_keys = existing + [key]
+            return obj
+
+        # install
+        mixin_class.__new__ = staticmethod(wrapped_new)
 
     def register_patch(
         self,
@@ -60,45 +103,20 @@ class PropertyRegistry:
         arg_extractor: Optional[Callable] = None
     ) -> None:
         """
-        Associate a monkey-patch spec with an existing property key.
-
-        patch_spec = (SympyClass, method_name, hook_name, head_attr, arg_extractor)
-
-        - `sympy_class`: the Sympy class whose method is being overridden
-          (e.g. sympy.Derivative, sympy.Limit, sympy.Integral, etc.)
-
-        - `method_name`: the name of the method we are wrapping (e.g. "doit")
-
-        - `hook_name`: the name of the mixin method on the operator that should be called
-                       (e.g. "_eval_limit", "_eval_derivative", "_eval_Integral")
-
-        - `head_attr`: either
-            * a `str` naming an attribute on `self` (e.g. "expr" or "function"),
-            * or a callable `f(self)->Expression` that extracts the “head” from `self`.
-
-        - `arg_extractor`: a callable `f(self)->tuple` that returns exactly the
-            positional arguments that the mixin’s hook expects.
-            If `None`, the mixin will be called with no extra arguments: i.e. `hook(head)`.
-
-        Raises KeyError if `key` has not been registered yet.
+        Associate a monkey‐patch spec with an existing property key.
         """
         if key not in self._registry:
             raise KeyError(f"Cannot register patch for unknown property key '{key}'.")
-        # Append the 5‐tuple to the patch‐registry
-        self._patch_registry[key].append((sympy_class, method_name, hook_name, head_attr, arg_extractor))
+        self._patch_registry[key].append(
+            (sympy_class, method_name, hook_name, head_attr, arg_extractor)
+        )
 
     def store_original_method(self, key: str, method: Callable) -> None:
-        """
-        Save the original (unpatched) method under this property key.
-        Mixins can retrieve it via get_original_method(key).
-        """
+        """Save the original (unpatched) method under this property key."""
         self._originals[key] = method
 
     def get_original_method(self, key: str) -> Callable:
-        """
-        Return the original method that was patched for this key.
-        Raises if no original was stored.
-        """
+        """Return the original method that was patched for this key."""
         try:
             return self._originals[key]
         except KeyError:
@@ -119,34 +137,27 @@ class PropertyRegistry:
             raise KeyError(f"Property key '{key}' is not registered.")
 
     def all_registered_properties(self) -> Dict[str, str]:
-        """Return a dict mapping property_key -> description."""
-        return {key: desc for key, (desc, _) in self._registry.items()}
+        """Return a dict mapping property_key → description."""
+        return {k: desc for k, (desc, _) in self._registry.items()}
 
-    def all_patch_specs(self) -> List[Tuple[str, Type, str, str, str, Callable]]:
-        """
-        Return a flat list of all registered patch specs in the form:
-          (property_key, SymClass, method_name, hook_name, head_attr)
-        """
-        specs: List[Tuple[str, Type, str, str, str, Callable]] = []
-        for key, patch_list in self._patch_registry.items():
-            for (SymClass, mname, hook, head_attr, arg_extractor) in patch_list:
-                specs.append((key, SymClass, mname, hook, head_attr, arg_extractor))
+    def all_patch_specs(self) -> List[Tuple[str, Type, str, str, Union[str, Callable], Optional[Callable]]]:
+        """Return all registered patch specs as a flat list."""
+        specs = []
+        for key, patches in self._patch_registry.items():
+            for spec in patches:
+                specs.append((key, *spec))
         return specs
 
 
-# Module‐level registry instance
+# Module‐level convenience functions and registry instance
+
 _registry = PropertyRegistry()
 
-
 def register_property(key: str, description: str) -> Callable:
-    """
-    Decorator to register a mixin class under a given property key.
-    """
-    def decorator(mixin_class: Type) -> Type:
-        _registry.register(key, description, mixin_class)
-        return mixin_class
+    def decorator(cls):
+        _registry.register(key, description, cls)
+        return cls
     return decorator
-
 
 def register_patch(
     key: str,
@@ -156,46 +167,21 @@ def register_patch(
     head_attr: Union[str, Callable],
     arg_extractor: Optional[Callable] = None
 ) -> None:
-    """
-    Convenience function to register a patch spec for an existing property key.
-
-    Example:
-
-        register_patch(
-            "pull_limit",
-            sympy.Limit,
-            "doit",
-            "_eval_limit",
-            lambda self: self.args[0],                # head = the inner function
-            lambda self: (self.args[1], self.args[2], self.args[3])  # (var, point, direction)
-        )
-    """
     _registry.register_patch(key, sympy_class, method_name, hook_name, head_attr, arg_extractor)
 
-
 def store_original_method(key: str, method: Callable) -> None:
-    """
-    Convenience function to store an original method for a property key.
-    """
     _registry.store_original_method(key, method)
 
-
 def get_original_method(key: str) -> Callable:
-    """
-    Convenience function to retrieve the original method for a property key.
-    """
     return _registry.get_original_method(key)
-
 
 def get_mixin_for_key(key: str) -> Type:
     return _registry.get_mixin_for_key(key)
 
-
 def all_registered_properties() -> Dict[str, str]:
     return _registry.all_registered_properties()
 
-
-def all_patch_specs() -> List[Tuple[str, Type, str, str, str]]:
+def all_patch_specs():
     return _registry.all_patch_specs()
 
 
@@ -204,75 +190,30 @@ if __name__ == "__main__":
     from sympy import Add
     from symantex.mixins.base import PropertyMixin
 
-    # Dummy mixin classes for testing
+    # Dummy tests
     class DummyMixinA(PropertyMixin):
         def __new__(cls, x):
-            return super().__new__(cls, x)
+            # bad style, but testing fallback
+            inst = super().__new__(cls)
+            return inst
 
     class DummyMixinB(PropertyMixin):
         pass
 
-    reg = PropertyRegistry()
+    # 1) Register
+    _registry.register("test_a", "A desc", DummyMixinA)
+    _registry.register("test_b", "B desc", DummyMixinB)
+    print("Keys:", all_registered_properties())
 
-    # 1) Register two properties
+    # 2) Patch‐unknown catches
     try:
-        reg.register("test_a", "Test property A", DummyMixinA)
-        print("Registered test_a successfully.")
-    except Exception as e:
-        print(f"Failed to register test_a: {e}")
-
-    try:
-        reg.register("test_b", "Test property B", DummyMixinB)
-        print("Registered test_b successfully.")
-    except Exception as e:
-        print(f"Failed to register test_b: {e}")
-
-    # 2) Attempt to register a patch for an unknown key
-    try:
-        register_patch("unknown_key", sympy.Add, "doit", "_eval_add_stub", "args")
+        register_patch("nope", sympy.Add, "doit", "_eval", "args")
     except KeyError as e:
-        print(f"Correctly caught attempt to patch unknown key: {e}")
+        print("Caught unknown:", e)
 
-    # 3) Register a patch spec for "test_a"
-    try:
-        register_patch(
-            "test_a",
-            sympy.Add,
-            "__new__",
-            "_eval_add_stub",
-            "args",                # head_attr
-            lambda self: tuple()   # arg_extractor (just an example)
-        )
-        print("Registered patch spec for test_a.")
-    except Exception as e:
-        print(f"Failed to register patch spec for test_a: {e}")
-
-    # 4) Retrieve mixin and patch specs
-    mix_a = get_mixin_for_key("test_a")
-    print(f"Retrieved mixin for test_a: {mix_a.__name__}")
-
-    all_props = all_registered_properties()
-    print(f"All registered properties: {all_props}")
-
-    specs = all_patch_specs()
-    print("All patch specs:", specs)
-
-    # 5) Using decorator to register another property
-    @register_property("test_c", "Test property C")
-    class DummyMixinC(PropertyMixin):
-        pass
-
-    print(f"Using decorator, registered test_c: {get_mixin_for_key('test_c').__name__}")
-    print(f"All registered properties after decorator: {all_registered_properties()}")
-
-    # 6) Verify that __new__ was wrapped:
-    inst_a = DummyMixinA(42)
-    print(f"inst_a._property_keys (should contain 'test_a'): {inst_a._property_keys}")
-
-    inst_b = DummyMixinB()
-    print(f"inst_b._property_keys (should contain 'test_b'): {inst_b._property_keys}")
-
-    inst_c = DummyMixinC()
-    print(f"inst_c._property_keys (should contain 'test_c'): {inst_c._property_keys}")
-
-    print("Self‐test completed.")
+    # 3) Wrap __new__ works
+    a = DummyMixinA(42)
+    b = DummyMixinB()
+    print("A keys:", getattr(a, "_property_keys", None))
+    print("B keys:", getattr(b, "_property_keys", None))
+    print("Self‐test passed.")

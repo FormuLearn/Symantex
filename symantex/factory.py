@@ -1,3 +1,5 @@
+# symantex/factory.py
+
 from typing import List, Optional, Tuple, Type, Dict
 import sympy as sp
 from sympy import Symbol, MatrixSymbol, Function
