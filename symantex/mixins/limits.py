@@ -1,7 +1,8 @@
-# File: symantex/mixins/limits.py
+# symantex/mixins/limits.py
 
+import sympy
 from sympy import Limit
-from symantex.registry import register_property
+from symantex.registry import register_property, register_patch
 from symantex.mixins.base import PropertyMixin
 
 @register_property(
@@ -11,17 +12,34 @@ from symantex.mixins.base import PropertyMixin
 )
 class PullsLimitMixin(PropertyMixin):
     """
-    Mixin for a Function‐class F so that 
+    Mixin for a Function‐class F so that
     Limit(F(arg1, arg2, …), var, point, dir).doit()
     becomes F(Limit(arg1, var, point, dir).doit(), …).
     """
     def _eval_limit(self, var, point, dir="+", **kwargs):
-        evaluated_args = [
+        # Apply Limit.doit to each argument
+        evaluated = [
             Limit(arg, var, point, dir).doit(**kwargs)
             for arg in self.args
         ]
-        return self.func(*evaluated_args)
+        # Re-wrap using the original function constructor
+        return self.func(*evaluated)
 
+# Register the patch for Limit.doit
+register_patch(
+    'pull_limit',
+    sympy.Limit,
+    'doit',
+    '_eval_limit',
+    head_attr=lambda self: (
+        self._args[0] if hasattr(self, '_args') else self._nargs[0]
+    ),
+    arg_extractor=lambda self: (
+        (self.args[1] if hasattr(self, 'args') else self._nargs[1]),
+        (self.args[2] if hasattr(self, 'args') else self._nargs[2]),
+        (self.args[3] if hasattr(self, 'args') else self._nargs[3])
+    )
+)
 
 @register_property(
     'distribute_limit',
@@ -30,16 +48,35 @@ class PullsLimitMixin(PropertyMixin):
 )
 class DistributeLimitMixin(PropertyMixin):
     """
-    Mixin for a Function‐class G so that 
+    Mixin for a Function‐class G so that
     Limit(G(arg1, arg2), var, point, dir).doit()
     becomes G(Limit(arg1, var, point, dir).doit(), Limit(arg2, var, point, dir).doit()).
     """
     def _eval_limit(self, var, point, dir="+", **kwargs):
-        evaluated_args = [
+        evaluated = [
             Limit(arg, var, point, dir).doit(**kwargs)
             for arg in self.args
         ]
-        return self.func(*evaluated_args)
+        return self.func(*evaluated)
+
+# Register the patch for Limit.doit
+default_extractor = lambda self: (
+    (self.args[1] if hasattr(self, 'args') else self._nargs[1]),
+    (self.args[2] if hasattr(self, 'args') else self._nargs[2]),
+    (self.args[3] if hasattr(self, 'args') else self._nargs[3])
+)
+
+register_patch(
+    'distribute_limit',
+    sympy.Limit,
+    'doit',
+    '_eval_limit',
+    head_attr=lambda self: (
+        self._args[0] if hasattr(self, '_args') else self._nargs[0]
+    ),
+    arg_extractor=default_extractor
+)
+
 
 if __name__ == "__main__":
     # === Simple tests for pull_limit and distribute_limit mixins ===
