@@ -1,154 +1,100 @@
-# File: symantex/mixins/commutes.py
-
-from sympy import Add, Symbol
+from sympy import Add, Mul, Symbol
 from sympy.core.function import UndefinedFunction
 from symantex.registry import register_property
 from symantex.mixins.base import PropertyMixin
 
-
-@register_property('commutes', "Operator is commutative in its arguments: f(a, b) = f(b, a)")
+@register_property(
+    'commutes',
+    "Operator is commutative in its arguments: f(a, b) = f(b, a)"
+)
 class CommutesFunctionMixin(PropertyMixin):
     """
-    Mixin that ensures function arguments are sorted in canonical order, making the operator commutative.
+    Mixin that ensures function arguments are sorted in canonical order.
     """
-    def __new__(cls, *args, **kwargs):
-        # Sort args using canonical Sympy ordering
+    @classmethod
+    def eval(cls, *args):
         sorted_args = cls.sort_args(args)
-        # Create or fetch an undefined function class for this mixin
         func = UndefinedFunction(cls.__name__)
-        instance = func(*sorted_args)
-        return instance
+        return func(*sorted_args)
 
-
-@register_property('commutes_add', "Symbol commutes under addition: x + y = y + x")
+@register_property(
+    'commutes_add',
+    "Symbol commutes under addition: x + y = y + x"
+)
 class CommutesAddMixin(PropertyMixin, Symbol):
     """
-    Mixin that ensures Symbol is commutative under addition by overriding addition.
+    Marker mixin: Sympy's Add already sorts arguments, so no override.
     """
-    def __new__(cls, name, **kwargs):
-        return super().__new__(cls, name, **kwargs)
+    pass
 
-    def __add__(self, other):
-        a, b = self.sort_args((self, other))
-        return Add(a, b, evaluate=True)
-
-    def __radd__(self, other):
-        return self.__add__(other)
-
-
-@register_property('commutes_mul', "Symbol commutes under multiplication: x * y = y * x")
+@register_property(
+    'commutes_mul',
+    "Symbol commutes under multiplication: x * y = y * x"
+)
 class CommutesMulMixin(PropertyMixin, Symbol):
     """
-    Mixin that ensures Symbol is commutative under multiplication by overriding multiplication.
+    Marker mixin to enforce commutativity via Symbol(commutative=True).
     """
     def __new__(cls, name, **kwargs):
         return super().__new__(cls, name, commutative=True, **kwargs)
 
-    def __mul__(self, other):
-        from sympy import Mul as SymMul
-        a, b = self.sort_args((self, other))
-        return SymMul(a, b, evaluate=True)
-
-    def __rmul__(self, other):
-        return self.__mul__(other)
-
-
 if __name__ == "__main__":
-    # Tests for commutes mixins
+    from sympy import symbols
     from symantex.factory import build_operator_class, build_symbol
-    from sympy import Symbol, symbols
 
     print("=== Testing function-level commutes ===")
-    # With commutes mixin
-    Foo = build_operator_class('Foo', ['commutes'], arity=2)
-    a_sym = Symbol('a')
-    b_sym = Symbol('b')
-    expr1 = Foo(a_sym, b_sym)
-    expr2 = Foo(b_sym, a_sym)
-    print(f" With commutes: expr1={expr1}, expr2={expr2}")
-    assert expr1 == expr2
-
-    # Without commutes mixin
-    Bar = build_operator_class('Bar', [], arity=2)
-    expr3 = Bar(a_sym, b_sym)
-    expr4 = Bar(b_sym, a_sym)
-    print(f" Without commutes: expr3={expr3}, expr4={expr4}")
-    assert expr3 != expr4
+    Foo = build_operator_class('Foo', ['commutes'], 2)
+    a, b = symbols('a b')
+    assert Foo(a, b) == Foo(b, a)
+    Bar = build_operator_class('Bar', [], 2)
+    assert Bar(a, b) != Bar(b, a)
+    print("Function-level tests passed.")
 
     print("\n=== Testing commutes_add ===")
-    # With commutes_add only
     X = build_symbol('x', ['commutes_add'])
     Y = build_symbol('y', ['commutes_add'])
-    sum1 = X + Y
-    sum2 = Y + X
-    print(f" With commutes_add: sum1={sum1}, sum2={sum2}")
-    assert sum1 == sum2
-
-    # Without commutes_add
-    U = build_symbol('u', [])
-    V = build_symbol('v', [])
-    sum3 = U + V
-    sum4 = V + U
-    print(f" Without commutes_add: sum3={sum3}, sum4={sum4}")
-    # Default Symbol is commutative under +, so these match:
-    assert sum3 == sum4
-
-    # Test non-commutativity in multiplication instead:
-    a_nc, b_nc = symbols('a_nc b_nc', commutative=False)
-    prod_nc1 = a_nc * b_nc
-    prod_nc2 = b_nc * a_nc
-    print(f" Non-commutative symbols (mul): prod_nc1={prod_nc1}, prod_nc2={prod_nc2}")
-    assert prod_nc1 != prod_nc2
+    assert X + Y == Y + X
+    U, V = build_symbol('u', []), build_symbol('v', [])
+    assert U + V == V + U  # default
+    # non-commutative symbols
+    p, q = symbols('p q', commutative=False)
+    assert p*q != q*p
+    print("commutes_add tests passed.")
 
     print("\n=== Testing commutes_mul ===")
-    # With commutes_mul only
     P = build_symbol('p', ['commutes_mul'])
     Q = build_symbol('q', ['commutes_mul'])
-    prod1 = P * Q
-    prod2 = Q * P
-    print(f" With commutes_mul: prod1={prod1}, prod2={prod2}")
-    assert prod1 == prod2
+    assert P*Q == Q*P
+    R, S = build_symbol('r', []), build_symbol('s', [])
+    assert R*S == S*R  # default
+    print("commutes_mul tests passed.")
 
-    # Without commutes_mul
-    R = build_symbol('r', [])
-    S = build_symbol('s', [])
-    prod3 = R * S
-    prod4 = S * R
-    print(f" Without commutes_mul: prod3={prod3}, prod4={prod4}")
-    # Default Symbol is commutative under *, so these match:
-    assert prod3 == prod4
+    print("\n=== Testing non-commutative addition rule ===")
+    # Define non_commutes_add inline
+    from sympy import Add
+    def NCAdd(a_, b_):
+        Func = UndefinedFunction('NCAdd')
+        return Func(a_, b_)
+    @register_property('non_commutes_add', 'True non-commutative add')
+    class NonCommAddMixin(PropertyMixin, Symbol):
+        def __new__(cls, name, **kwargs):
+            obj = super().__new__(cls, name, **kwargs)
+            obj._property_keys = ['non_commutes_add']
+            return obj
+        def __add__(self, other):
+            return NCAdd(self, other)
+        def __radd__(self, other):
+            return NCAdd(other, self)
+    # Tests
+    Xn = build_symbol('x', ['non_commutes_add'])
+    Yn = build_symbol('y', ['non_commutes_add'])
+    assert Xn + Yn != Yn + Xn
+    U0, V0 = build_symbol('u0', []), build_symbol('v0', [])
+    assert U0+V0 == V0+U0
+    Zn, Wn = build_symbol('z', ['non_commutes_add']), build_symbol('w', [])
+    assert Zn+Wn != Wn+Zn
+    An, Bn = build_symbol('a', []), build_symbol('b', ['non_commutes_add'])
+    assert An+Bn != Bn+An
+    print("non_commutes_add tests passed.")
 
-    # Test non-commutativity in multiplication explicitly:
-    u_nc, v_nc = symbols('u_nc v_nc', commutative=False)
-    prod_nc3 = u_nc * v_nc
-    prod_nc4 = v_nc * u_nc
-    print(f" Non-commutative symbols (mul): prod_nc3={prod_nc3}, prod_nc4={prod_nc4}")
-    assert prod_nc3 != prod_nc4
-
-    print("\n=== Combined tests ===")
-    # commutes_add but not commutes_mul
-    A = build_symbol('a', ['commutes_add'])
-    B = build_symbol('b', ['commutes_add'])
-    c_sum1 = A + B
-    c_sum2 = B + A
-    print(f" A+B with commutes_add: {c_sum1}, {c_sum2}")
-    assert c_sum1 == c_sum2
-    c_prod1 = A * B
-    c_prod2 = B * A
-    print(f" A*B without commutes_mul: {c_prod1}, {c_prod2}")
-    # Again, default Symbol is commutative under *, so these match:
-    assert c_prod1 == c_prod2
-
-    # commutes_mul but not commutes_add
-    M = build_symbol('m', ['commutes_mul'])
-    N = build_symbol('n', ['commutes_mul'])
-    d_prod1 = M * N
-    d_prod2 = N * M
-    print(f" M*N with commutes_mul: {d_prod1}, {d_prod2}")
-    assert d_prod1 == d_prod2
-    d_sum1 = M + N
-    d_sum2 = N + M
-    print(f" M+N without commutes_add: {d_sum1}, {d_sum2}")
-    assert d_sum1 == d_sum2  # default Symbol is commutative under +
-
-    print("\nAll CommutesMixin tests passed.")
+    print("All commutes mixin tests passed.")
