@@ -73,10 +73,17 @@ class PropertyRegistry:
                 #    actually runs and sets up _args/_nargs correctly).
                 mro = cls_.__mro__
                 idx = mro.index(mixin_class)
+
                 for base in mro[idx+1:]:
-                    base_new = getattr(base, "__new__", None)
-                    if base_new is None:
+                    # ← skip *any* mixin‐only classes so we get to Function.__new__
+                    if issubclass(base, PropertyMixin):
                         continue
+
+                    base_new = getattr(base, "__new__", None)
+                    # ← object.__new__ is not what we want here
+                    if base_new is None or base_new is object.__new__:
+                        continue
+
                     try:
                         obj = base_new(cls_, *args, **kwargs)
                         break
@@ -84,6 +91,7 @@ class PropertyRegistry:
                         continue
                 else:
                     obj = object.__new__(cls_)
+
 
             # 3) Finally, attach or extend the _property_keys list
             existing = getattr(obj, "_property_keys", [])

@@ -1,4 +1,4 @@
-from sympy import Derivative, Integer
+from sympy import Derivative, Integer, Add
 from sympy.core.function import UndefinedFunction
 from symantex.registry import register_property, register_patch
 from symantex.mixins.base import PropertyMixin
@@ -55,6 +55,44 @@ register_patch(
     hook_name='_eval_derivative',
 )
 
+# === Chain-rule mixin for n-ary operators ===
+@register_property(
+    'pull_derivative_chain',
+    "Chain-rule derivative: d/dx f(u1,...,un) = Σ_i f(u1,...,u_i',...,un),\n" 
+    "with a special case: if no argument depends on x, return f(0,...,0)."
+)
+class PullDerivativeChainMixin(PropertyMixin):
+    """
+    Mixin for an n-ary operator f so that:
+      d/dx f(u1,...,un) = sum_i f(u1,...,u_i.diff(x),...,un),
+    and if all u_i.diff(x) == 0, returns f(0,...,0).
+    """
+    def _eval_derivative(self, var):
+        # Only apply for arity >= 2
+        args = list(self.args)
+        if len(args) < 2:
+            return Derivative(self, var)
+        # Compute all derivatives
+        diffs = [a.diff(var) for a in args]
+        # Special-case: none depend on var
+        if all(d == Integer(0) for d in diffs):
+            return self.func(*[Integer(0)] * len(args))
+        # Otherwise sum chain-rule terms
+        terms = []
+        for i in range(len(args)):
+            new_args = [diffs[j] if j == i else args[j] for j in range(len(args))]
+            terms.append(self.func(*new_args))
+        return Add(*terms, evaluate=True)
+
+# Patch Derivative.doit to use our chain-rule mixin
+register_patch(
+    'pull_derivative_chain',
+    Derivative,
+    'doit',
+    head_attr=lambda deriv: deriv.args[0] if deriv.args else None,
+    hook_name='_eval_derivative',
+)
+
 # === Self-tests ===
 if __name__ == "__main__":
     from sympy import symbols
@@ -92,3 +130,48 @@ if __name__ == "__main__":
     print("product_rule tests passed.\n")
 
     print("All linear + product_rule mixin tests passed.")
+
+
+    print("Testing Chain Rule")
+    from sympy import Derivative as D
+    x, y = symbols('x y')
+
+    print("=== Testing chain-rule mixin ===")
+    # Binary operator G
+    G = build_operator_class('G', ['pull_derivative_chain'], arity=2)
+    exprG = D(G(x**2, x**3), x).doit()
+    expectedG = G(2*x, x**3) + G(x**2, 3*x**2)
+    print(f" d/dx G(x^2, x^3) = {exprG} (expected {expectedG})")
+    assert exprG == expectedG
+
+    # Partial on unrelated variable y -> G(0,0)
+    exprGy = D(G(x**2, x**3), y).doit()
+    expectedGy = G(0, 0)
+    print(f" d/dy G(x^2, x^3) = {exprGy} (expected {expectedGy})")
+    assert exprGy == expectedGy
+
+    # Ternary operator H
+    H = build_operator_class('H', ['pull_derivative_chain'], arity=3)
+    exprH = D(H(x, x**2, x**3), x).doit()
+    expected_terms = {
+        H(Integer(1), x**2, x**3),
+        H(x, 2*x, x**3),
+        H(x, x**2, 3*x**2)
+    }
+    print(f" d/dx H(x, x^2, x^3) = {exprH} (expected terms {expected_terms})")
+    assert set(exprH.args) == expected_terms
+
+        # Wrong arity: unary should fallback
+    U = build_operator_class('U', ['pull_derivative_chain'], arity=1)
+    resultU = D(U(x**2), x).doit()
+    print(" d/dx U(x^2) fallback yields a Derivative instance")
+    assert isinstance(resultU, D)
+
+    # Zero-arity fallback
+    R = build_operator_class('R', ['pull_derivative_chain'], arity=0)
+    resultR = D(R(), x).doit()
+    print(" d/dx R() fallback yields a Derivative instance")
+    assert isinstance(resultR, D)
+
+    print("All chain-rule mixin tests passed.")
+
