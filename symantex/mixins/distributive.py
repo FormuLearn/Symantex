@@ -1,159 +1,171 @@
-from sympy import Add, Mul, Symbol, symbols
-from sympy.core.function import UndefinedFunction
-from symantex.registry import register_property
+# File: symantex/mixins/distributive.py
+
+from sympy import Symbol, Add
+from symantex.registry import register_property, store_original_method
 from symantex.mixins.base import PropertyMixin
 
-@register_property(
-    'commutes',
-    "Operator is commutative in its arguments: f(a, b) = f(b, a)"
-)
-class CommutesFunctionMixin(PropertyMixin):
-    """
-    Mixin that ensures function arguments are sorted in canonical order, making the operator commutative.
-    """
-    @classmethod
-    def eval(cls, *args):
-        # Sort args using canonical Sympy ordering
-        sorted_args = cls.sort_args(args)
-        # Construct the function via UndefinedFunction to preserve dynamic class name
-        func = UndefinedFunction(cls.__name__)
-        return func(*sorted_args)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 1) “Left‐distribution” mixin
+# ────────────────────────────────────────────────────────────────────────────────
 
 @register_property(
-    'commutes_add',
-    "Symbol commutes under addition: x + y = y + x"
+    'distribute_mul_add_left',
+    "Symbol multiplication distributes over addition on the left: x*(y+z) = x*y + x*z"
 )
-class CommutesAddMixin(PropertyMixin, Symbol):
-    """
-    Marker mixin to mark a Symbol as "commutes under +".  Sympy's Add already
-    sorts arguments, so no override is strictly necessary.
-    """
-    pass
-
-@register_property(
-    'commutes_mul',
-    "Symbol commutes under multiplication: x * y = y * x"
-)
-class CommutesMulMixin(PropertyMixin, Symbol):
-    """
-    Marker mixin to mark a Symbol as "commutes under *".  Sympy's Mul already
-    sorts arguments, so no override is strictly necessary.
-    """
+class DistributeMulAddLeftMixin(PropertyMixin, Symbol):
     def __new__(cls, name, **kwargs):
-        # Ensure symbol is declared commutative
-        return super().__new__(cls, name, commutative=True, **kwargs)
+        # Create a new Symbol (Symbol defaults to commutative=True)
+        return super().__new__(cls, name, **kwargs)
+
+    def __mul__(self, other):
+        # If the right‐hand side is an Add, distribute over its args
+        if isinstance(other, Add):
+            from sympy import Mul as SymMul
+            return Add(
+                *[SymMul(self, term, evaluate=True) for term in other.args],
+                evaluate=True
+            )
+        # Otherwise, behave exactly like normal Mul
+        from sympy import Mul as SymMul
+        return SymMul(self, other, evaluate=True)
+
+    def __rmul__(self, other):
+        # If the left‐hand side is an Add, distribute on the right as well
+        if isinstance(other, Add):
+            from sympy import Mul as SymMul
+            return Add(
+                *[SymMul(term, self, evaluate=True) for term in other.args],
+                evaluate=True
+            )
+        # Otherwise, fallback to Symbol.__rmul__
+        return super().__rmul__(other)
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 2) “Right‐distribution” mixin (patches Add.__mul__)
+# ────────────────────────────────────────────────────────────────────────────────
 
 @register_property(
-    'non_commutes_add',
-    "Symbol uses a truly non-commutative addition: x + y -> NCAdd(x, y)"
+    'distribute_mul_add_right',
+    "Distribute addition over multiplication on the right: (y+z)*x = y*x + z*x"
 )
-class NonCommAddMixin(PropertyMixin, Symbol):
+class DistributeMulAddRightMixin(PropertyMixin, Symbol):
     """
-    Mixin that replaces x + y with NCAdd(x, y), a non-commutative addition node.
+    Mixin that patches sympy.Add.__mul__ so that, when you do (Y+Z)*X,
+    if X._property_keys contains "distribute_mul_add_right", then Add.__mul__
+    delegates to X.__rmul__, forcing the expansion.
+
+    We implement this by overriding __init_subclass__ (invoked at class‐creation time)
+    to perform exactly one global patch of Add.__mul__.  We also store the original
+    Add.__mul__ so that get_original_method("distribute_mul_add_right") works.
     """
+
     def __new__(cls, name, **kwargs):
-        obj = super().__new__(cls, name, **kwargs)
-        obj._property_keys = ['non_commutes_add']
-        return obj
+        # Create a new Symbol (Symbol defaults to commutative=True)
+        return super().__new__(cls, name, **kwargs)
 
-    def __add__(self, other):
-        return NCAdd(self, other)
+    def __rmul__(self, other):
+        # This is invoked when something like Add(...) * self happens after patch.
+        # To distribute, if other is Add, expand over its args.
+        if isinstance(other, Add):
+            from sympy import Mul as SymMul
+            return Add(
+                *[SymMul(term, self, evaluate=True) for term in other.args],
+                evaluate=True
+            )
+        # Otherwise, default behavior
+        return super().__rmul__(other)
 
-    def __radd__(self, other):
-        return NCAdd(other, self)
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+        # Only patch Add.__mul__ once
+        if getattr(Add, "_patched_for_distribute_right", False):
+            return
+        Add._patched_for_distribute_right = True
+
+        # Save the original Add.__mul__
+        original_add_mul = Add.__mul__
+        store_original_method('distribute_mul_add_right', original_add_mul)
+
+        def patched_add_mul(self, other):
+            """
+            When Add.__mul__(self, other) is called, inspect other._property_keys.
+            If it contains "distribute_mul_add_right", delegate to other.__rmul__(self).
+            Otherwise, fall back to the original Add.__mul__.
+            """
+            prop_keys = getattr(other, "_property_keys", [])
+            if "distribute_mul_add_right" in prop_keys:
+                return other.__rmul__(self)
+            return original_add_mul(self, other)
+
+        Add.__mul__ = patched_add_mul
 
 
-def NCAdd(a, b):
-    """
-    Create a non-commutative "addition" node NCAdd(a, b).  Never reorders args.
-    """
-    Func = UndefinedFunction("NCAdd")
-    return Func(a, b)
-
+# ────────────────────────────────────────────────────────────────────────────────
+# 3) Tests (run via `python distributive.py`)
+# ────────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from symantex.factory import build_operator_class, build_symbol
-    from sympy import Symbol, Add, Mul, symbols
+    from sympy import symbols
+    from symantex.factory import build_symbol
 
-    a_sym, b_sym = Symbol('a'), Symbol('b')
-    # === Function-level commutes ===
-    print("=== Testing function-level commutes ===")
-    Foo = build_operator_class('Foo', ['commutes'], arity=2)
-    expr1 = Foo(a_sym, b_sym)
-    expr2 = Foo(b_sym, a_sym)
-    print(f" With commutes: Foo(a,b)={expr1}, Foo(b,a)={expr2}")
-    assert expr1 == expr2
+    print("=== Testing distribute_mul_add mixins ===")
 
-    Bar = build_operator_class('Bar', [], arity=2)
-    expr3 = Bar(a_sym, b_sym)
-    expr4 = Bar(b_sym, a_sym)
-    print(f" Without commutes: Bar(a,b)={expr3}, Bar(b,a)={expr4}")
-    assert expr3 != expr4
-    print("Function-level commutes tests passed.\n")
+    # ─── (a) Left‐distribution ONLY ───────────────────────────────────────────────
+    D1 = build_symbol('d1', ['distribute_mul_add_left'])
+    E1 = build_symbol('e1', [])
+    X1 = build_symbol('x1', [])
 
-    # === Symbol-level commutes_add ===
-    print("=== Testing commutes_add ===")
-    X = build_symbol('x', ['commutes_add'])
-    Y = build_symbol('y', ['commutes_add'])
-    sum1 = X + Y
-    sum2 = Y + X
-    print(f" With commutes_add: x+y={sum1}, y+x={sum2}")
-    assert sum1 == sum2
+    expr1 = D1 * (E1 + X1)
+    expected1 = D1*E1 + D1*X1
+    print(f" Left only: {D1}*({E1}+{X1}) = {expr1}  (expected {expected1})")
+    assert expr1 == expected1
 
-    # Negative: marker only, but default symbols also commute under +
-    U, V = build_symbol('u', []), build_symbol('v', [])
-    sum3, sum4 = U + V, V + U
-    print(f" Without commutes_add: u+v={sum3}, v+u={sum4}")
-    assert sum3 == sum4
-    # Ensure no property key on Add
-    assert getattr((sum3).func, 'property_keys', None) is None
-    print("Symbol-level commutes_add tests passed.\n")
+    expr1b = (E1 + X1) * D1
+    print(f" Left only: ({E1}+{X1})*{D1} = {expr1b}  (no distribution on right)")
+    assert expr1b == (E1 + X1)*D1
 
-    # === Symbol-level commutes_mul ===
-    print("=== Testing commutes_mul ===")
-    P = build_symbol('p', ['commutes_mul'])
-    Q = build_symbol('q', ['commutes_mul'])
-    prod1, prod2 = P * Q, Q * P
-    print(f" With commutes_mul: p*q={prod1}, q*p={prod2}")
-    assert prod1 == prod2
+    # ─── (b) Right‐distribution ONLY ──────────────────────────────────────────────
+    D2 = build_symbol('d2', ['distribute_mul_add_right'])
+    E2 = build_symbol('e2', [])
+    X2 = build_symbol('x2', [])
 
-    # Negative: default symbols (commutative True) also match, but no key
-    R, S = build_symbol('r', []), build_symbol('s', [])
-    prod3, prod4 = R * S, S * R
-    print(f" Without commutes_mul: r*s={prod3}, s*r={prod4}")
-    assert prod3 == prod4
-    assert getattr((prod3).func, 'property_keys', None) is None
-    print("Symbol-level commutes_mul tests passed.\n")
+    expr2 = D2 * (E2 + X2)
+    print(f" Right only: {D2}*({E2}+{X2}) = {expr2}  (no left‐distribution)")
+    assert expr2 == D2*(E2 + X2)
 
-    # === Non-commutative addition ===
-    print("=== Testing non_commutes_add ===")
-    Xn = build_symbol('x', ['non_commutes_add'])
-    Yn = build_symbol('y', ['non_commutes_add'])
-    expr_nc1 = Xn + Yn
-    expr_nc2 = Yn + Xn
-    print(f" With non_commutes_add both: x+y={expr_nc1}, y+x={expr_nc2}")
-    assert expr_nc1 != expr_nc2
-    assert expr_nc1.func.__name__ == 'NCAdd' and expr_nc1.args == (Xn, Yn)
-    assert expr_nc2.args == (Yn, Xn)
+    expr2b = (E2 + X2) * D2
+    expected2b = E2*D2 + X2*D2
+    print(f" Right only: ({E2}+{X2})*{D2} = {expr2b}  (expected {expected2b})")
+    assert expr2b == expected2b
 
-    # Negative: neither has mixin
-    U0, V0 = build_symbol('u0', []), build_symbol('v0', [])
-    nsum1, nsum2 = U0 + V0, V0 + U0
-    print(f" Without non_commutes_add: u0+v0={nsum1}, v0+u0={nsum2}")
-    assert nsum1 == nsum2 and isinstance(nsum1, Add)
+    # ─── (c) BOTH left and right ──────────────────────────────────────────────────
+    D3 = build_symbol('d3', ['distribute_mul_add_left', 'distribute_mul_add_right'])
+    E3 = build_symbol('e3', [])
+    X3 = build_symbol('x3', [])
 
-    # Left-only
-    Z = build_symbol('z', ['non_commutes_add'])
-    W = build_symbol('w', [])
-    mix1, mix2 = Z + W, W + Z
-    print(f" Left-only mixin: z+w={mix1}, w+z={mix2}")
-    assert mix1.func.__name__ == 'NCAdd' and isinstance(mix2, Add)
+    expr3 = D3 * (E3 + X3)
+    expected3 = D3*E3 + D3*X3
+    print(f" Both sides: {D3}*({E3}+{X3}) = {expr3}  (expected {expected3})")
+    assert expr3 == expected3
 
-    # Right-only
-    A, B = build_symbol('a', []), build_symbol('b', ['non_commutes_add'])
-    mix3, mix4 = A + B, B + A
-    print(f" Right-only mixin: a+b={mix3}, b+a={mix4}")
-    assert isinstance(mix3, Add) and mix4.func.__name__ == 'NCAdd'
-    print("Non-commutative addition tests passed.\n")
+    expr3b = (E3 + X3) * D3
+    expected3b = E3*D3 + X3*D3
+    print(f" Both sides: ({E3}+{X3})*{D3} = {expr3b}  (expected {expected3b})")
+    assert expr3b == expected3b
 
-    print("All CommutesMixin tests passed (positive & negative).")
+    # ─── (d) NEITHER left nor right ───────────────────────────────────────────────
+    D4 = build_symbol('d4', [])  # no distribution keys
+    E4 = build_symbol('e4', [])
+    X4 = build_symbol('x4', [])
+
+    expr4a = D4 * (E4 + X4)
+    expr4b = (E4 + X4) * D4
+    print(f" Neither: {D4}*({E4}+{X4}) = {expr4a}  (should remain Mul)")
+    print(f" Neither: ({E4}+{X4})*{D4} = {expr4b}  (should remain Mul)")
+    assert expr4a == D4*(E4 + X4)
+    assert expr4b == (E4 + X4)*D4
+
+    print("\nAll distribute_mul_add mixin tests passed.")
