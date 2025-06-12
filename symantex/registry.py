@@ -26,6 +26,7 @@ class PropertyRegistry:
     _registry: Dict[str, Tuple[str, Type]]
     _patch_registry: Dict[str, List[PatchSpec]]
     _originals: Dict[str, Callable]
+    _categories: Dict[str, str]
 
     def __new__(cls):
         if cls._instance is None:
@@ -33,6 +34,7 @@ class PropertyRegistry:
             cls._instance._registry = {}
             cls._instance._patch_registry = {}
             cls._instance._originals = {}
+            cls._instance._categories = {}
         return cls._instance
 
     def register(self, key: str, description: str, mixin_class: Type) -> None:
@@ -143,6 +145,17 @@ class PropertyRegistry:
             return self._registry[key][0]
         except KeyError:
             raise KeyError(f"Property key '{key}' is not registered.")
+        
+    def assign_category(self, key: str, category: str) -> None:
+        """Tag a registered property with a category (e.g. 'default', 'advanced')."""
+        if key not in self._registry:
+            raise KeyError(f"Property key '{key}' is not registered.")
+        self._categories[key] = category
+
+    def properties_in_category(self, category: str) -> list[str]:
+        """Return all property-keys tagged with `category`."""
+        return [k for k, cat in self._categories.items() if cat == category]
+
 
     def all_registered_properties(self) -> Dict[str, str]:
         """Return a dict mapping property_key → description."""
@@ -161,11 +174,21 @@ class PropertyRegistry:
 
 _registry = PropertyRegistry()
 
-def register_property(key: str, description: str) -> Callable:
+def register_property(
+    key: str,
+    description: str,
+    *,
+    category: str = "default"
+) -> Callable:
+    """
+    Register a mixin under `key`, with a human description *and* a category tag.
+    """
     def decorator(cls):
         _registry.register(key, description, cls)
+        _registry.assign_category(key, category)
         return cls
     return decorator
+
 
 def register_patch(
     key: str,
@@ -198,30 +221,47 @@ if __name__ == "__main__":
     from sympy import Add
     from symantex.mixins.base import PropertyMixin
 
-    # Dummy tests
+
+    # ———————————————————————————————————————————————————————————————
+    # Dummy mixins registered via decorator (with explicit categories)
+    # ———————————————————————————————————————————————————————————————
+    @register_property("test_a", "A desc", category="unit")
     class DummyMixinA(PropertyMixin):
         def __new__(cls, x):
-            # bad style, but testing fallback
             inst = super().__new__(cls)
             return inst
 
+    @register_property("test_b", "B desc", category="unit")
     class DummyMixinB(PropertyMixin):
         pass
 
-    # 1) Register
-    _registry.register("test_a", "A desc", DummyMixinA)
-    _registry.register("test_b", "B desc", DummyMixinB)
-    print("Keys:", all_registered_properties())
+    print("All keys:", list(all_registered_properties().keys()))
+    # Expect to see 'test_a' and 'test_b' in the full registry
+    assert "test_a" in all_registered_properties()
+    assert "test_b" in all_registered_properties()
 
-    # 2) Patch‐unknown catches
+    print("Unit-category keys:", _registry.properties_in_category("unit"))
+    # Both dummy tests should live in the 'unit' category
+    assert set(_registry.properties_in_category("unit")) == {"test_a", "test_b"}
+
+    # ———————————————————————————————————————————————————————————————
+    # 2) Patch‐unknown still raises KeyError
+    # ———————————————————————————————————————————————————————————————
     try:
         register_patch("nope", sympy.Add, "doit", "_eval", "args")
     except KeyError as e:
-        print("Caught unknown:", e)
+        print("Caught expected KeyError for unknown patch:", e)
+    else:
+        raise RuntimeError("register_patch('nope',…) should have raised KeyError")
 
-    # 3) Wrap __new__ works
+    # ———————————————————————————————————————————————————————————————
+    # 3) __new__ wrapping: instances get their key in _property_keys
+    # ———————————————————————————————————————————————————————————————
     a = DummyMixinA(42)
     b = DummyMixinB()
-    print("A keys:", getattr(a, "_property_keys", None))
-    print("B keys:", getattr(b, "_property_keys", None))
+    print("A._property_keys:", a._property_keys)
+    print("B._property_keys:", b._property_keys)
+    assert a._property_keys == ["test_a"]
+    assert b._property_keys == ["test_b"]
+
     print("Self‐test passed.")
