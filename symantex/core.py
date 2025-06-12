@@ -8,6 +8,7 @@ from mirascope import llm
 from symantex.errors import (
     APIKeyMissingError,
     UnsupportedModelError,
+    UnsupportedProviderError,
     StructuredOutputError,
     EmptyExpressionsError,
     SympyConversionError
@@ -35,17 +36,33 @@ class Symantex:
 
     _JSON_MODELS = {"gpt-4o-mini"}
 
+    _JSON_PROVIDERS = {"openai"}
+
     def __init__(self, provider: str = "openai", model: str = "gpt-4o-mini") -> None:
-        if model not in self._JSON_MODELS:
-            raise UnsupportedModelError(f"Model '{model}' does not support JSON Mode.")
-        self.provider = provider
-        self.model = model
+        self.set_model(model)
+        self.set_provider(provider)
         self._api_key: Optional[str] = None
 
     def register_key(self, api_key: str) -> None:
         self._api_key = api_key
         if self.provider.lower() == "openai":
             os.environ["OPENAI_API_KEY"] = api_key
+
+    def get_model(self):
+        return self.model
+
+    def set_model(self, model):
+        if model not in self._JSON_MODELS:
+            raise UnsupportedModelError(f"Model '{model}' does not support JSON Mode.")
+        self.model = model
+
+    def get_provider(self):
+        return self.provider
+    
+    def set_provider(self, provider):
+        if provider not in self._JSON_PROVIDERS:
+            raise UnsupportedProviderError
+        self.provider = provider
 
     @llm.call(provider="openai", model="gpt-4o-mini", json_mode=True)
     def _mirascope_call(self, prompt: str) -> str:
@@ -70,6 +87,8 @@ class Symantex:
             "- Eq(lhs, rhs) for equations (no `=`).",
             "- Sum(w_j*u_j, (j,1,K)) for sums (no comprehensions).",
             "- symbols('u1:K+1') or IndexedBase('u') for sequences, no `...`.",
+            "- If you introduce any new or domain-specific operator (e.g. argmin, argmax, softmax, relu, logistic, attenuation) etc...,",
+            "  wrap it as Function('name')(...), so it's a valid Sympy function call.",
             "",
             f"Latex: {latex}"
         ]

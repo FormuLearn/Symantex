@@ -7,6 +7,9 @@ class APIKeyMissingError(SymantexError):
 class UnsupportedModelError(SymantexError):
     """Raised at init if the chosen model isn’t known to support JSON mode."""
 
+class UnsupportedProviderError(SymantexError):
+    """Raised at init if the LLM provider is unknown"""
+
 class StructuredOutputError(SymantexError):
     """
     Raised when the LLM fails to produce valid JSON.
