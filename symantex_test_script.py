@@ -1,61 +1,82 @@
-# example_usage.py
-
+# test_symantex.py
 import os
+import textwrap
+import unittest
+
+import sympy
 from symantex.core import Symantex
-from symantex.errors import (
-    APIKeyMissingError,
-    UnsupportedModelError,
-    StructuredOutputError,
-    EmptyExpressionsError,
-    SympyConversionError
-)
 
-def main():
-    # 1. Grab your dev key from the environment
-    api_key = os.getenv("SYMANTEX_DEV_KEY")
-    if not api_key:
-        raise RuntimeError("Please set SYMANTEX_DEV_KEY in your environment.")
+# ---------------------------------------------------------------------------#
+API_KEY = os.getenv("SYMANTEX_DEV_KEY")
+if API_KEY is None:
+    raise unittest.SkipTest("SYMANTEX_DEV_KEY not set; skipping live LLM tests")
 
-    # 2. Initialize Symantex and register the key
-    try:
-        sx = Symantex(provider="openai", model="gpt-4o-mini")
-    except UnsupportedModelError as e:
-        print("Model error:", e)
-        return
+# ---------------------------------------------------------------------------#
+CASES = [
+    # 1 – single, simple fraction
+    (r"A = \frac{B}{C}", False),
 
-    sx.register_key(api_key)
+    # 2 – arg-min training objective (complex)
+    (
+        r"\theta_{\mathrm{opt}}"
+        r"=\underset{\theta \in \Theta}{\operatorname{argmin}}"
+        r"\,\frac{1}{N}\sum_{i=1}^{N} L\!\left(\mathcal{N}_{\theta}(\mathbf{u}_{i}),"
+        r"\mathbf{y}_{i}\right)",
+        False,
+    ),
 
-    # 3. A list of test LaTeX inputs
-    tests = [
-        r"x^2 + 2x + 1",
-        r"\frac{d}{dx} \sin(x)",
-        r"\int_0^\infty e^{-x}\,dx",
-    ]
+    # 3 – multiple outputs (two equations)
+    (
+        r"\begin{cases} x^2 + y^2 = 1, \\ x - y = 0 \end{cases}",
+        True,
+    ),
+]
 
-    # 4. Run through them
-    for latex in tests:
-        print(f"\n=== LaTeX: {latex}")
-        try:
-            # simple conversion
-            exprs = sx.to_sympy(latex)
-            for e in exprs:
-                print("  →", e, "  (type:", type(e).__name__, ")")
-        except (APIKeyMissingError, StructuredOutputError,
-                EmptyExpressionsError, SympyConversionError) as e:
-            print("  [Error]", type(e).__name__, e)
+# ---------------------------------------------------------------------------#
+class TestSymantexEndToEnd(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.sx = Symantex()
+        cls.sx.register_key(API_KEY)
 
-    # 5. Example with context and notes
-    print("\n=== With context & notes")
-    latex = r"\sin^2(x) + \cos^2(x)"
-    try:
-        exprs, notes = sx.to_sympy(latex,
-                                   context="Verify the Pythagorean identity",
-                                   output_notes=True)
-        print("  Expressions:", exprs)
-        print("  Notes from model:", notes)
-    except Exception as e:
-        print("  [Error]", type(e).__name__, e)
+    # -------------------------------------------------------------------#
+    def _run_case(self, latex: str, expect_multiple: bool) -> None:
+        exprs, notes, multiple = self.sx.to_sympy(
+            latex,
+            output_notes=True,
+            failure_logs=True,
+            max_retries=1,
+        )
+
+        # ----------- Assertions ----------------------------------------
+        self.assertIsInstance(notes, str)
+        self.assertEqual(multiple, expect_multiple)
+        self.assertGreaterEqual(len(exprs), 1)
+        if expect_multiple:
+            self.assertGreater(len(exprs), 1)
+
+        for e in exprs:
+            self.assertIsInstance(e, sympy.Expr)
+
+        # ----------- Pretty print --------------------------------------
+        latex_snippet = textwrap.shorten(latex, width=60, placeholder="…")
+        print(
+            "\n" + "=" * 72,
+            f"\nLATEX     : {latex_snippet}",
+            f"\nPARSED    : {exprs}",
+            f"\nNOTES     : {textwrap.shorten(notes, width=60, placeholder='…')}",
+            f"\nMULTIPLE? : {multiple}",
+            "\n" + "-" * 72,
+        )
+
+    # -------------------------------------------------------------------#
+    def test_all_cases(self) -> None:
+        for latex, expect_multiple in CASES:
+            with self.subTest(latex=latex[:40] + "..."):
+                self._run_case(latex, expect_multiple)
 
 
+# ---------------------------------------------------------------------------#
 if __name__ == "__main__":
-    main()
+    # Use higher verbosity so unittest prints sub-test names
+    unittest.main(verbosity=2)

@@ -1,3 +1,5 @@
+#symantex/errors.py
+
 class SymantexError(Exception):
     """Base class for all Symantex errors."""
 
