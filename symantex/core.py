@@ -1,134 +1,128 @@
-import re
+# symantex/core.py
+
 import os
-from pydantic import BaseModel
+import json
+from typing import List, Optional, Union
+
 from mirascope import llm
-import warnings
+from symantex.errors import (
+    APIKeyMissingError,
+    UnsupportedModelError,
+    StructuredOutputError,
+    EmptyExpressionsError,
+    SympyConversionError
+)
 import sympy
+
 
 class Symantex:
     """
-    LaTeX-to-Sympy converter using Mirascope in strict JSON mode.
-    Only models supporting structured(`json_mode=True`) output will work.
-
-    Usage:
-        from symantex import Symantex
-        sx = Symantex(provider="openai", model="gpt-4o-mini")
-        sx.register_key("your-openai-key")
-        expr, multiple, notes = sx.to_sympy(latex, context="...", output_notes=True)
+    Convert LaTeX input into Sympy expressions by leveraging Mirascope's JSON Mode.
     """
-    # Disallow raw TeX commands that could be harmful
-    _forbidden_latex = ["\\write", "\\open", "\\input", "\\include"]
-    # Known models with JSON support
-    _supported_json_models = {
-        "openai": [
-            "gpt-4o-mini", "gpt-4o", "gpt-4-0613", "gpt-4o-0613", "gpt-4o-2024-08-06"
-        ]
+
+    # Known models that support JSON Mode
+    _JSON_MODELS = {
+        "gpt-4o-mini",
     }
 
-    class _Result(BaseModel):
-        exprs: list[str]
-        notes: str = None
-
-    def __init__(self, provider: str = "openai", model: str = "gpt-4o-mini"):
-        # Warn if model may not support JSON
-        if model not in self._supported_json_models.get(provider, []):
-            warnings.warn(
-                f"Model '{model}' may not support JSON responses. "
-                f"Supported: {self._supported_json_models.get(provider)}"
-            )
+    def __init__(self, provider: str = "openai", model: str = "gpt-4o-mini") -> None:
+        """
+        :param provider: The LLM provider to use (e.g., "openai").
+        :param model: The model name; must support JSON Mode.
+        :raises UnsupportedModelError: If the model isn’t JSON-capable.
+        """
         self.provider = provider
         self.model = model
-        # Single structured call
-        @llm.call(
-            provider=self.provider,
-            model=self.model,
-            response_model=Symantex._Result,
-            json_mode=True
-        )
-        def _call(prompt: str) -> Symantex._Result:
-            return prompt
-        self._call = _call
+        if self.model not in self._JSON_MODELS:
+            raise UnsupportedModelError(f"Model '{self.model}' does not support JSON Mode.")
+        self._api_key: Optional[str] = None
 
-    def register_key(self, api_key: str):
-        if not api_key:
-            raise ValueError("API key must be provided")
-        os.environ[f"{self.provider.upper()}_API_KEY"] = api_key
-
-    def to_sympy(self, latex: str, context: str = None, output_notes: bool = False):
+    def register_key(self, api_key: str) -> None:
         """
-        Convert LaTeX to Sympy expressions via strict JSON output.
-
-        Returns:
-          - expr: Sympy Expr or tuple of Exprs
-          - multiple: bool
-          - notes: assumptions or error message
+        Register the API key for the chosen provider. Must be called before to_sympy().
         """
-        # Check API key
-        key_var = f"{self.provider.upper()}_API_KEY"
-        if key_var not in os.environ:
-            raise RuntimeError(f"API key not set; call register_key() for {self.provider}")
-        # Sanitize input
-        if any(cmd in latex for cmd in self._forbidden_latex):
-            raise ValueError("Disallowed LaTeX command in input")
+        self._api_key = api_key
+        if self.provider.lower() == "openai":
+            os.environ["OPENAI_API_KEY"] = api_key
 
-        # Build JSON-mode prompt
-        lines = [
-            "You are an expert Python assistant.",
-            "Return a JSON object with keys:\n"
-            "  exprs: list of Sympy expression strings (no assignment)\n"
-            "  notes: assumptions/comments (optional)",
-            f"LaTeX: {latex}" 
+    @llm.call(provider="openai", model="gpt-4o-mini", json_mode=True)
+    def _mirascope_call(self, prompt: str) -> str:
+        """
+        Internal Mirascope call in JSON Mode. Overridden at runtime with the chosen provider/model.
+        """
+        return prompt
+
+    def to_sympy(
+        self,
+        latex: str,
+        context: Optional[str] = None,
+        output_notes: bool = False
+    ) -> Union[List[sympy.Expr], tuple[List[sympy.Expr], str]]:
+        """
+        Convert a LaTeX string to Sympy expressions.
+
+        :param latex: The LaTeX to convert.
+        :param context: Extra context for the model (optional).
+        :param output_notes: If True, also return the model’s notes.
+        :returns: A list of Expr, or (exprs, notes).
+        :raises APIKeyMissingError: If register_key() wasn’t called.
+        :raises StructuredOutputError: On JSON parsing/structure errors.
+        :raises EmptyExpressionsError: If the returned "exprs" list is empty.
+        :raises SympyConversionError: If sympify fails on any returned string.
+        """
+        if not self._api_key:
+            raise APIKeyMissingError("API key missing; call register_key() first.")
+
+        # Build a prompt that asks strictly for our two keys
+        prompt_lines = [
+            "Return a JSON object with exactly two keys:",
+            '  "exprs": a list of Sympy-parsable strings,',
+            '  "notes": a string of assumptions/comments.',
+            "",
+            f"Latex: {latex}"
         ]
         if context:
-            lines.insert(2, f"Context: {context}")
-        lines.append("Only import from sympy what you need; no markdown fences.")
-        prompt = "\n".join(lines)
+            prompt_lines.insert(-1, f"Context: {context}")
+        prompt = "\n".join(prompt_lines)
 
-        # Call the model
+        # Override the decorated call with our chosen provider/model
+        call_fn = llm.override(self._mirascope_call,
+                               provider=self.provider,
+                               model=self.model)
         try:
-            response = self._call(prompt)
-            codes = response.exprs
-            notes = response.notes if output_notes else None
+            response = call_fn(prompt)
+            raw = getattr(response, "content", response)
         except Exception as e:
-            msg = f"Structured output failed: {type(e).__name__}: {e}"
-            if output_notes:
-                return None, False, msg
-            raise RuntimeError(msg)
+            # Positional arg only
+            raise StructuredOutputError(str(e)) from e
 
-        if not codes:
-            raise ValueError("Model returned no expressions.")
+        # Parse JSON
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            raise StructuredOutputError(f"Invalid JSON: {e}") from e
 
-                # Prepare safe globals: only __import__ and sympy namespace
-        safe_globals = {"__builtins__": {"__import__": __import__}}
-        safe_globals.update({k: getattr(sympy, k) for k in dir(sympy) if not k.startswith("__")})
-        # For LaTeX parsing fallback
-        from sympy.parsing.latex import parse_latex
+        # Validate structure
+        if not isinstance(data, dict) or "exprs" not in data or "notes" not in data:
+            raise StructuredOutputError(f"Expected keys 'exprs' and 'notes', got: {data}")
 
-        sympy_exprs = []
-        for snippet in codes:
-            # Clean fences
-            text = re.sub(r"^```(?:python)?", "", snippet).rstrip("```")
-            # Attempt exec for full control
-            code = f"expr = {text}"
-            local_vars: dict = {}
+        expr_strs = data["exprs"]
+        notes = data["notes"]
+
+        if not isinstance(expr_strs, list):
+            raise StructuredOutputError(f"'exprs' is not a list: {expr_strs}")
+        if len(expr_strs) == 0:
+            raise EmptyExpressionsError("No expressions returned by model.")
+
+        # Convert each string to a Sympy Expr
+        exprs: List[sympy.Expr] = []
+        for expr_str in expr_strs:
             try:
-                exec(code, safe_globals, local_vars)
-                expr = local_vars.get("expr")
-                if expr is None:
-                    raise ValueError(f"Snippet did not produce 'expr': {text}")
+                # sympify only accepts 'locals', not 'globals' :contentReference[oaicite:1]{index=1}
+                expr = sympy.sympify(expr_str)
+                exprs.append(expr)
             except Exception as e:
-                # Fallback to sympy.latex parser on original latex
-                try:
-                    expr = parse_latex(latex)
-                    if output_notes:
-                        notes = (notes or "") + f" Fallback to parse_latex due to: {type(e).__name__}: {e}"
-                except Exception as e2:
-                    err = f"Fallback parser error {type(e2).__name__}: {e2}"
-                    if output_notes:
-                        return None, False, err
-                    raise
-            sympy_exprs.append(expr)
+                # Positional args for your exception
+                raise SympyConversionError(expr_str, str(e)) from e
 
-        multiple = len(sympy_exprs) > 1
-        result = tuple(sympy_exprs) if multiple else sympy_exprs[0]
-        return result, multiple, notes
+        return (exprs, notes) if output_notes else exprs
