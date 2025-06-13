@@ -161,7 +161,7 @@ class Symantex:
                 parsed, notes, multiple = self._parse_and_validate(
                     raw_json, extra_locals or {}
                 )
-                return (parsed, notes, multiple) if output_notes else parsed
+                return (parsed, notes, multiple) if output_notes else (parsed, multiple)
 
             except (StructuredOutputError, SympyConversionError) as err:
                 if attempt == max_retries:

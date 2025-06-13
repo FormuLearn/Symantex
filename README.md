@@ -2,6 +2,8 @@
 
 **Symantex** (pronounced “semantics”) is a modular LaTeX→SymPy converter built on top of Mirascope’s structured-JSON API.  It transforms arbitrary LaTeX snippets into executable SymPy `Expr` and `Eq` objects, with hooks for domain-specific operators, custom prompt engineering, and dynamic parser configuration.
 
+**Documentation:** Available at [FormuLearn Docs](https://docs.formulearn.org/docs/projects)
+
 ---
 
 ## 🚀 Features
@@ -19,3 +21,4 @@
 
 ```bash
 pip install symantex
+```
