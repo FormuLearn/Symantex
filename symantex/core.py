@@ -1,5 +1,11 @@
-# symantex/core.py
 from __future__ import annotations
+
+"""Symantex — LaTeX ➜ SymPy via LLMs.
+
+This version (0.1) introduces **custom locals** support.  Pass a mapping
+of name → SymPy object at call time (`extra_locals=`) or register it once
+per instance with the convenience helper `register_locals()`.  Nothing
+else in the public API changed. """
 
 import json
 import os
@@ -52,14 +58,15 @@ _NESTED_CALL_RE = re.compile(
     r"\b([A-Za-z_]\w*)\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\(\s*([^\)]+?)\s*\)"
 )
 
+
 def _flatten_nested_call(code: str) -> str | None:
-    """
-    Convert f(a)(b)  ->  f_a(b)
+    """Convert f(a)(b)  ->  f_a(b)
     Only fires when both a and the outer function are single identifiers.
     Returns the modified string, or None if no change.
     """
     new = _NESTED_CALL_RE.sub(r"\1_\2(\3)", code)
     return new if new != code else None
+
 
 # ---------------------------------------------------------------------------#
 class Symantex:
@@ -73,6 +80,7 @@ class Symantex:
         self.set_provider(provider)
         self.set_model(model)
         self._api_key: Optional[str] = None
+        self._custom_locals: dict[str, sympy.Basic] = {}
 
     # ---------------------------------------------------------------------#
     # API-key helper
@@ -80,6 +88,23 @@ class Symantex:
         self._api_key = api_key
         if self.provider == "openai":
             os.environ["OPENAI_API_KEY"] = api_key
+
+    # ---------------------------------------------------------------------#
+    # Convenience: persistent custom locals for the instance
+    def register_locals(self, mapping: dict[str, sympy.Basic]) -> None:
+        """Store ``mapping`` as an overlay applied to every call.
+
+        This is sugar for interactive sessions; heavy‑duty codebases may
+        prefer the stateless ``extra_locals`` kwarg on :py:meth:`to_sympy`.
+        """
+        if not isinstance(mapping, dict):
+            raise TypeError("register_locals() expects a dict-like object")
+        # Copy to avoid surprises if caller mutates later
+        self._custom_locals = dict(mapping)
+
+    def clear_locals(self) -> None:
+        """Remove any registered locals overlay."""
+        self._custom_locals.clear()
 
     # ---------------------------------------------------------------------#
     # Config setters with validation
@@ -106,10 +131,24 @@ class Symantex:
         latex: str,
         context: Optional[str] = None,
         *,
+        extra_locals: Optional[dict[str, sympy.Basic]] = None,
         output_notes: bool = False,
         failure_logs: bool = False,
         max_retries: int = 2,
     ) -> Union[List[sympy.Expr], Tuple[List[sympy.Expr], str, bool]]:
+        """Convert *latex* into SymPy expressions.
+
+        Parameters
+        ----------
+        latex
+            The LaTeX string to convert.
+        context
+            Optional natural‑language context sent to the LLM.
+        extra_locals
+            Mapping of *name → SymPy object* merged with the internal base
+            dictionary when parsing.  Shadows both built‑in and
+            previously‑registered names.
+        """
         if not self._api_key:
             raise APIKeyMissingError("Call register_key() first.")
 
@@ -119,7 +158,9 @@ class Symantex:
             raw_json = self._run_llm(prompt, failure_logs)
 
             try:
-                parsed, notes, multiple = self._parse_and_validate(raw_json)
+                parsed, notes, multiple = self._parse_and_validate(
+                    raw_json, extra_locals or {}
+                )
                 return (parsed, notes, multiple) if output_notes else parsed
 
             except (StructuredOutputError, SympyConversionError) as err:
@@ -186,14 +227,21 @@ JSON:
 
     # ---------------------------------------------------------------------#
     # JSON + SymPy validation
-    def _parse_and_validate(self, raw_json: str) -> Tuple[List[sympy.Expr], str, bool]:
+    def _parse_and_validate(
+        self,
+        raw_json: str,
+        extra_locals: dict[str, sympy.Basic],
+    ) -> Tuple[List[sympy.Expr], str, bool]:
+        """Parse JSON from the LLM and validate SymPy expressions."""
         try:
             data = json.loads(raw_json)
         except Exception as e:
             raise StructuredOutputError(f"Invalid JSON: {e}") from e
 
         if not all(k in data for k in ("exprs", "notes", "multiple")):
-            raise StructuredOutputError(f"Missing keys in JSON. Got: {list(data.keys())}")
+            raise StructuredOutputError(
+                f"Missing keys in JSON. Got: {list(data.keys())}"
+            )
 
         expr_strs = data["exprs"]
         if isinstance(expr_strs, str):
@@ -205,7 +253,10 @@ JSON:
 
         parsed, failures = [], []
         for code in expr_strs:
-            locals_map = dict(_BASE_LOCALS)  # fresh copy per expression
+            # fresh copy per expression
+            locals_map: dict[str, sympy.Basic] = {**_BASE_LOCALS, **self._custom_locals}
+            if extra_locals:
+                locals_map.update(extra_locals)
 
             # Promote identifiers followed by “(” to Function — even for N/E/I/pi
             for fname in _FUNC_CALL_RE.findall(code):
@@ -213,9 +264,9 @@ JSON:
 
             try:
                 parsed.append(
-                    parse_expr(code,
-                               transformations=_TRANSFORMATIONS,
-                               local_dict=locals_map)
+                    parse_expr(
+                        code, transformations=_TRANSFORMATIONS, local_dict=locals_map
+                    )
                 )
                 continue
             except Exception:
@@ -224,9 +275,11 @@ JSON:
                 if fixed:
                     try:
                         parsed.append(
-                            parse_expr(fixed,
-                                       transformations=_TRANSFORMATIONS,
-                                       local_dict=locals_map)
+                            parse_expr(
+                                fixed,
+                                transformations=_TRANSFORMATIONS,
+                                local_dict=locals_map,
+                            )
                         )
                         continue
                     except Exception:
