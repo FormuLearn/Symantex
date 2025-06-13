@@ -1,2 +1,21 @@
 # Symantex
-Symantex (pronounced semantics) is a modular LaTeX-to-SymPy parser with support for custom grammars and semantic notation. Built for flexibility and extensibility, it lets you define how LaTeX expressions should be interpreted, making it easy to adapt to different domains or styles.
+
+**Symantex** (pronounced “semantics”) is a modular LaTeX→SymPy converter built on top of Mirascope’s structured-JSON API.  It transforms arbitrary LaTeX snippets into executable SymPy `Expr` and `Eq` objects, with hooks for domain-specific operators, custom prompt engineering, and dynamic parser configuration.
+
+---
+
+## 🚀 Features
+
+- **Reliable JSON mode** via Mirascope LLM calls  
+- **Automatic parsing** into SymPy ASTs (`Eq`, `Sum`, `Matrix`, derivatives, transforms…)  
+- **Dynamic locals map** lets you register new functions/symbols (e.g. `argmin`, `softmax`, `attention`)  
+- **Pluggable prompt** that enforces valid Sympy code (`Eq(...)`, `Sum(...)`, no ellipses)  
+- **Graceful degradation**: partial parse success, intelligent failure logging for diagnostics  
+- **Customizable parser** via regular-expression token discovery  
+
+---
+
+## 📦 Installation
+
+```bash
+pip install symantex
