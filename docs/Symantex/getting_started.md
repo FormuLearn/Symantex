@@ -25,7 +25,7 @@ More providers will come soon...
 export SYMANTEX_KEY="sk‑..."   # bash/zsh
 ```
 
-## 3  Hello, SymPy!
+## 3  Hello, Symantex!
 
 ```python
 from symantex.core import Symantex
