@@ -1,0 +1,45 @@
+[build-system]
+requires      = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------- PEP 621 metadata ----------
+[project]
+dependencies = [
+  # SymPy is mandatory
+  "sympy>=1.14,<2",
+
+  # You need the “openai” extra of mirascope as well
+  "mirascope[openai]>=1.25",
+]
+
+name            = "symantex"
+version         = "0.1.0"
+description     = "Thin python interface for using Large Language Models to convert LaTeX into Sympy for automatic mathematical processing"
+readme          = "README.md"
+authors         = [{name = "Nicholas Roy / FormuLearn B.V.", email = "nicholas.roy@formulearn.org"}]
+requires-python = ">=3.10"
+license         = "GPL-3.0-only"
+classifiers     = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/FormuLearn/Symantex"
+Issues   = "https://github.com/FormuLearn/Symantex/issues"
+
+# ---------- Setuptools-specific knobs ----------
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+# Only ship the core package, but keep its *templates* folder.
+[tool.setuptools.packages.find]
+where    = ["src"]
+include  = ["symantex"]          # just the top-level package
+
+# Everything else in the repo is left out of the wheel:
+exclude  = [
+  "symantex.examples*",
+  "symantex.mixins*",
+  "symantex.templates*",
+]
