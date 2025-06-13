@@ -244,7 +244,7 @@ JSON:
     @staticmethod
     def _repair_prompt(prev_prompt: str, err: Exception) -> str:
         return (
-            "❌ Your last JSON was rejected.\n"
+            "Your last JSON was rejected.\n"
             f"Reason: {err}\n\n"
             "Reread the rules, THINK, then output **one line** containing only a "
             "corrected JSON object with keys `exprs`, `notes`, `multiple`."

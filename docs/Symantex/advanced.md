@@ -1,8 +1,10 @@
-----------------------------------
+---
 title: Advanced Topics
 description: Advanced Usage with Symantex
 slug: /projects/symantex/advanced/
 sidebar_position: 3
+---
+
 ----------------------------------
 
 # Advanced Topics
@@ -27,9 +29,12 @@ sx.to_sympy("f(x) = 0")                 # f → Function('f') auto‑created
 # But you can bind it explicitly:
 custom = {"f": sp.Function("f", real=True)}
 exprs = sx.to_sympy("f(x)=0", extra_locals=custom)
+
 ```
 
 ## Switching provider/model
+
+> **Note**: As of now, only openai and gpt-4o-mini are supported. This will be updated in future versions. 
 
 ```python
 sx = Symantex(provider="openai", model="gpt-4o-mini")   # default

@@ -1,11 +1,13 @@
------------------------------------------
-title: Troubleshooting
-description: Troubleshooting Symantex
-slug: /projects/symantex/troubleshooting/
+---
+title: Errors
+description: Symantex Errors
+slug: /projects/symantex/errors/
 sidebar_position: 4
+---
+
 -----------------------------------------
 
-# Troubleshooting
+# Errors
 
 | Symantex error          | Typical cause                           | Quick fix                                     |
 | ----------------------- | --------------------------------------- | --------------------------------------------- |

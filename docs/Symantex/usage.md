@@ -1,8 +1,10 @@
--------------------------------
+---
 title: Basic Usage
 description: Basic usage with Symantex
 slug: /projects/symantex/usage/
 sidebar_position: 2
+---
+
 -------------------------------
 
 # Basic Usage
@@ -30,7 +32,7 @@ exprs, notes, multiple = sx.to_sympy(
 ### Returning multiple expressions
 
 ```python
-exprs, _, multiple = sx.to_sympy(r"\begin{cases} x^2+y^2=1, \\ x-y=0 \end{cases}", output_notes=True)
+exprs, notes, multiple = sx.to_sympy(r"\begin{cases} x^2+y^2=1, \\ x-y=0 \end{cases}", output_notes=True)
 assert multiple and len(exprs) == 2
 ```
 
@@ -42,4 +44,6 @@ sx.to_sympy(
     context="Assume c is the speed of light, m is mass.",
 )
 ```
+
+In the case of more complex equations, it can be especially helpful to add context to help the large language model resolve what types different symbols are supposed to be.
 

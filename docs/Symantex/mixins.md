@@ -1,8 +1,10 @@
---------------------------------
+---
 title: Mixins (Custom Operators)
 description: Coming soon...
 slug: /projects/symantex/mixins/
 sidebar_position: 5
+---
+
 --------------------------------
 
 # Mixins – Customising Operators & Symbols *(coming soon)*
