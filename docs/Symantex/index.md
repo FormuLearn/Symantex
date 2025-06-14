@@ -1,7 +1,7 @@
 ---
 title: Symantex
 description: High‑level overview of the Symantex library – LaTeX ➜ SymPy via LLMs
-slug: projects/symantex/
+slug: /projects/symantex/
 ---
 
 -------------------------
