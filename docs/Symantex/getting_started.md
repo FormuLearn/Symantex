@@ -33,8 +33,9 @@ import os
 
 sx = Symantex()
 sx.register_key(os.environ["SYMANTEX_KEY"])
-exprs = sx.to_sympy(r"x^2 + y^2 = 1")
-print(exprs[0])          # → Eq(x**2 + y**2, 1)
+exprs, multiple = sx.to_sympy(r"x^2 + y^2 = 1")
+print(exprs)          # → [Eq(Add(Pow(x, 2), Pow(y, 2)), 1)]
+print(multiple)       # → False
 ```
 
 *That’s it.*  Keep reading **Usage** for more nuanced examples.

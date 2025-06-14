@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 name            = "symantex"
-version         = "0.1.0"
+version         = "0.2.0"
 description     = "Thin python interface for using Large Language Models to convert LaTeX into Sympy for automatic mathematical processing"
 readme          = "README.md"
 authors         = [{name = "Nicholas Roy / FormuLearn B.V.", email = "nicholas.roy@formulearn.org"}]

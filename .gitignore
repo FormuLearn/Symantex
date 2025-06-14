@@ -1,1 +1,4 @@
 .doculinkr/
+dist/
+src/symantex.egg-info/
+
