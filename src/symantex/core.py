@@ -1,11 +1,11 @@
 from __future__ import annotations
+"""Symantex — LaTeX ➜ SymPy via LLMs.
 
-"""Symantex — LaTeX ➜ SymPy via LLMs.
-
-This version (0.1) introduces **custom locals** support.  Pass a mapping
-of name → SymPy object at call time (`extra_locals=`) or register it once
-per instance with the convenience helper `register_locals()`.  Nothing
-else in the public API changed. """
+v0.2 — adds a prompt rule that **flattens subscripts / superscripts**.
+  • All LaTeX identifiers like R_{r}^{val} ⇒ Symbol("R_r_val")  
+  • Disallows interpretations such as R(r)**v or nested Symbol(Symbol(...)).
+Nothing else in the public API changed.
+"""
 
 import json
 import os
@@ -70,7 +70,7 @@ def _flatten_nested_call(code: str) -> str | None:
 
 # ---------------------------------------------------------------------------#
 class Symantex:
-    """Convert LaTeX ➜ SymPy, delegating JSON formatting to an LLM."""
+    """Convert LaTeX ➜ SymPy, delegating JSON formatting to an LLM."""
 
     _JSON_MODELS = {"gpt-4o-mini"}
     _JSON_PROVIDERS = {"openai"}
@@ -83,7 +83,7 @@ class Symantex:
         self._custom_locals: dict[str, sympy.Basic] = {}
 
     # ---------------------------------------------------------------------#
-    # API-key helper
+    # API‑key helper
     def register_key(self, api_key: str) -> None:
         self._api_key = api_key
         if self.provider == "openai":
@@ -92,18 +92,11 @@ class Symantex:
     # ---------------------------------------------------------------------#
     # Convenience: persistent custom locals for the instance
     def register_locals(self, mapping: dict[str, sympy.Basic]) -> None:
-        """Store ``mapping`` as an overlay applied to every call.
-
-        This is sugar for interactive sessions; heavy‑duty codebases may
-        prefer the stateless ``extra_locals`` kwarg on :py:meth:`to_sympy`.
-        """
         if not isinstance(mapping, dict):
-            raise TypeError("register_locals() expects a dict-like object")
-        # Copy to avoid surprises if caller mutates later
-        self._custom_locals = dict(mapping)
+            raise TypeError("register_locals() expects a dict‑like object")
+        self._custom_locals = dict(mapping)          # defensive copy
 
     def clear_locals(self) -> None:
-        """Remove any registered locals overlay."""
         self._custom_locals.clear()
 
     # ---------------------------------------------------------------------#
@@ -119,13 +112,13 @@ class Symantex:
         self.provider = provider
 
     # ---------------------------------------------------------------------#
-    # LLM wrapper (Mirascope handles JSON mode)
+    # LLM wrapper (Mirascope handles JSON‑mode)
     @llm.call(provider="openai", model="gpt-4o-mini", json_mode=True)
     def _mirascope_call(self, prompt: str) -> str:  # pragma: no cover
         return prompt
 
     # ---------------------------------------------------------------------#
-    # Public API
+    # Public API
     def to_sympy(
         self,
         latex: str,
@@ -136,19 +129,6 @@ class Symantex:
         failure_logs: bool = False,
         max_retries: int = 2,
     ) -> Union[List[sympy.Expr], Tuple[List[sympy.Expr], str, bool]]:
-        """Convert *latex* into SymPy expressions.
-
-        Parameters
-        ----------
-        latex
-            The LaTeX string to convert.
-        context
-            Optional natural‑language context sent to the LLM.
-        extra_locals
-            Mapping of *name → SymPy object* merged with the internal base
-            dictionary when parsing.  Shadows both built‑in and
-            previously‑registered names.
-        """
         if not self._api_key:
             raise APIKeyMissingError("Call register_key() first.")
 
@@ -171,20 +151,20 @@ class Symantex:
                 prompt = self._repair_prompt(prompt, err)  # Reflexion loop
 
     # ---------------------------------------------------------------------#
-    # Prompt construction
+    # Prompt construction  🔵 ***UPDATED SECTION*** 🔵
     def _build_prompt(self, latex: str, context: Optional[str]) -> str:
         GOLD_EXAMPLE = r"""
-LaTeX: \alpha = \arg\min_{x\in\mathbb{R}} \frac 1 N \sum_{i=1}^N f(x_i)
+LaTeX: R_{r}^{\mathrm{val}} = \frac 1 k \sum_{j=1}^k R_{rj}^{\mathrm{val}}
 JSON:
 {
-  "exprs": ["Eq(alpha, argmin(x, Symbol('R'), Sum(f(x_i), (i, 1, N))/N))"],
-  "notes": "empirical risk minimisation over ℝ",
+  "exprs": ["Eq(R_r_val, Sum(R_rj_val, (j, 1, k))/k)"],
+  "notes": "validation reward averaged over k folds",
   "multiple": false
 }
 """.strip()
 
         parts = [
-            "You are Symantex — convert LaTeX to **valid SymPy strings**.",
+            "You are Symantex — convert LaTeX to **valid SymPy strings**.",
             "",
             "Return exactly **one** JSON object (no markdown fences).",
             "",
@@ -193,14 +173,19 @@ JSON:
             "### REQUIREMENTS",
             "1. Each string in \"exprs\" must parse with `sympy.parse_expr`.",
             "2. Use Eq(lhs, rhs) — never a bare '='.",
-            "3. Sums/Integrals → Sum(...), Integral(...) — no comprehensions.",
-            "4. Bare symbols like N, Theta (or symbols('Theta')); do not quote them.",
+            "3. Sums/Integrals → Sum(...), Integral(...) — no comprehensions.",
+            "4. Bare identifiers (N, Theta, …) stay bare; do *not* quote them.",
             "5. Reserved names N, E, I, pi are symbols unless *called*.",
-            "6. To denote a *parameterised* operator (\\mathcal{N}_θ(u))",
-            "write **N_theta(u)** — NEVER N(theta)(u).",
+            "6. For a parameterised operator (\\mathcal{N}_θ(u)) write N_theta(u),",
+            "   **never** N(theta)(u).",
             "7. Unknown ops (argmin, relu, …) → plain calls (argmin(...)).",
-            "8. Field \"multiple\" is true iff len(exprs) > 1.",
-            "9. Think step-by-step internally; show only the final JSON.",
+            "8. Field \"multiple\" is true iff len(exprs) > 1.",
+            "9. Think step‑by‑step internally; show only the final JSON.",
+            "10. **Flatten every sub-/superscript into the symbol name**:",
+            "    • X_{i}      →  X_i",
+            "    • W^{out}    →  W_out",
+            "    • R_{r}^{val}→  R_r_val",
+            "    Do NOT output function calls like R(r) or exponentiation like R**val.",
             "",
             f"Context: {context}" if context else "",
             f"LATEX INPUT: {latex}",
@@ -214,7 +199,7 @@ JSON:
         reply = call(prompt)
         raw = reply.content if hasattr(reply, "content") else reply
 
-        # If OpenAI JSON-mode blocked the content, let Reflexion handle it
+        # If OpenAI JSON‑mode blocked the content, let Reflexion handle it
         try:
             maybe = json.loads(raw)
             if isinstance(maybe, dict) and "error" in maybe:
@@ -226,13 +211,12 @@ JSON:
         return raw
 
     # ---------------------------------------------------------------------#
-    # JSON + SymPy validation
+    # JSON + SymPy validation (unchanged)
     def _parse_and_validate(
         self,
         raw_json: str,
         extra_locals: dict[str, sympy.Basic],
     ) -> Tuple[List[sympy.Expr], str, bool]:
-        """Parse JSON from the LLM and validate SymPy expressions."""
         try:
             data = json.loads(raw_json)
         except Exception as e:
@@ -253,8 +237,7 @@ JSON:
 
         parsed, failures = [], []
         for code in expr_strs:
-            # fresh copy per expression
-            locals_map: dict[str, sympy.Basic] = {**_BASE_LOCALS, **self._custom_locals}
+            locals_map = {**_BASE_LOCALS, **self._custom_locals}
             if extra_locals:
                 locals_map.update(extra_locals)
 
@@ -264,26 +247,19 @@ JSON:
 
             try:
                 parsed.append(
-                    parse_expr(
-                        code, transformations=_TRANSFORMATIONS, local_dict=locals_map
-                    )
+                    parse_expr(code, transformations=_TRANSFORMATIONS, local_dict=locals_map)
                 )
                 continue
             except Exception:
-                # one-shot heuristic: f(a)(b)  ->  f_a(b)
                 fixed = _flatten_nested_call(code)
                 if fixed:
                     try:
                         parsed.append(
-                            parse_expr(
-                                fixed,
-                                transformations=_TRANSFORMATIONS,
-                                local_dict=locals_map,
-                            )
+                            parse_expr(fixed, transformations=_TRANSFORMATIONS, local_dict=locals_map)
                         )
                         continue
                     except Exception:
-                        pass  # fall through
+                        pass
                 failures.append(code)
 
         if failures:
@@ -293,7 +269,7 @@ JSON:
         return parsed, data["notes"], multiple
 
     # ---------------------------------------------------------------------#
-    # Reflexion repair prompt
+    # Reflexion repair prompt (unchanged)
     @staticmethod
     def _repair_prompt(prev_prompt: str, err: Exception) -> str:
         return (
