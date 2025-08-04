@@ -1,9 +1,9 @@
 from __future__ import annotations
-"""Symantex — LaTeX ➜ SymPy via LLMs.
+"""Symantex — LaTeX ➜ SymPy via LLMs.
 
-v0.2 — adds a prompt rule that **flattens subscripts / superscripts**.
-  • All LaTeX identifiers like R_{r}^{val} ⇒ Symbol("R_r_val")  
-  • Disallows interpretations such as R(r)**v or nested Symbol(Symbol(...)).
+v0.2 — adds a prompt rule that **flattens subscripts / superscripts**.
+  • All LaTeX identifiers like R_{r}^{val} ⇒ Symbol("R_r_val")
+  • Disallows interpretations such as R(r)**v or nested Symbol(Symbol(...)).
 Nothing else in the public API changed.
 """
 
@@ -11,6 +11,12 @@ import json
 import os
 import re
 from typing import List, Optional, Tuple, Union
+
+import aiohttp
+import backoff
+import asyncio
+from tqdm.asyncio import tqdm_asyncio
+
 
 import sympy
 from mirascope import llm
@@ -70,9 +76,21 @@ def _flatten_nested_call(code: str) -> str | None:
 
 # ---------------------------------------------------------------------------#
 class Symantex:
-    """Convert LaTeX ➜ SymPy, delegating JSON formatting to an LLM."""
+    """Convert LaTeX ➜ SymPy, delegating JSON formatting to an LLM."""
 
-    _JSON_MODELS = {"gpt-4o-mini"}
+    _JSON_MODELS = {
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4o-2024-11-20",
+        "o3",
+        "o3-mini",
+        "o4-mini",
+        "o1",
+        "o1-pro",
+        "gpt-4.1",
+        "gpt-4.1-nano",
+        "gpt-4.1-mini",
+    }
     _JSON_PROVIDERS = {"openai"}
 
     # ---------------------------------------------------------------------#
@@ -93,7 +111,7 @@ class Symantex:
     # Convenience: persistent custom locals for the instance
     def register_locals(self, mapping: dict[str, sympy.Basic]) -> None:
         if not isinstance(mapping, dict):
-            raise TypeError("register_locals() expects a dict‑like object")
+            raise TypeError("register_locals() expects a dict-like object")
         self._custom_locals = dict(mapping)          # defensive copy
 
     def clear_locals(self) -> None:
@@ -112,13 +130,51 @@ class Symantex:
         self.provider = provider
 
     # ---------------------------------------------------------------------#
-    # LLM wrapper (Mirascope handles JSON‑mode)
     @llm.call(provider="openai", model="gpt-4o-mini", json_mode=True)
-    def _mirascope_call(self, prompt: str) -> str:  # pragma: no cover
+    async def _mirascope_call_async(self, prompt: str) -> str:  # pragma: no cover
         return prompt
 
     # ---------------------------------------------------------------------#
     # Public API
+    async def to_sympy_async(
+        self,
+        latex: str,
+        context: Optional[str] = None,
+        *,
+        extra_locals: Optional[dict[str, sympy.Basic]] = None,
+        output_notes: bool = False,
+        failure_logs: bool = False,
+        max_retries: int = 2,
+        per_call_timeout: float = 30.0,
+    ) -> Union[List[sympy.Expr], Tuple[List[sympy.Expr], str, bool]]:
+        if not self._api_key:
+            raise APIKeyMissingError("Call register_key() first.")
+
+        prompt = self._build_prompt(latex, context)
+
+        for attempt in range(max_retries + 1):
+            try:
+                raw_json = await asyncio.wait_for(
+                    self._run_llm_async(prompt, failure_logs), timeout=per_call_timeout
+                )
+            except Exception as e:
+                if attempt == max_retries:
+                    raise
+                prompt = self._repair_prompt(prompt, e)
+                continue
+
+            try:
+                parsed, notes, multiple = self._parse_and_validate(
+                    raw_json, extra_locals or {}
+                )
+                return (parsed, notes, multiple) if output_notes else (parsed, multiple)
+            except (StructuredOutputError, SympyConversionError) as err:
+                if attempt == max_retries:
+                    if failure_logs and isinstance(err, SympyConversionError):
+                        err.notes = f"Prompt:\n{prompt}\n\nLLM output:\n{raw_json}"
+                    raise
+                prompt = self._repair_prompt(prompt, err)
+
     def to_sympy(
         self,
         latex: str,
@@ -132,26 +188,29 @@ class Symantex:
         if not self._api_key:
             raise APIKeyMissingError("Call register_key() first.")
 
-        prompt = self._build_prompt(latex, context)
-
-        for attempt in range(max_retries + 1):
-            raw_json = self._run_llm(prompt, failure_logs)
-
-            try:
-                parsed, notes, multiple = self._parse_and_validate(
-                    raw_json, extra_locals or {}
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # no running loop, safe to block
+            return asyncio.run(
+                self.to_sympy_async(
+                    latex,
+                    context,
+                    extra_locals=extra_locals,
+                    output_notes=output_notes,
+                    failure_logs=failure_logs,
+                    max_retries=max_retries,
                 )
-                return (parsed, notes, multiple) if output_notes else (parsed, multiple)
-
-            except (StructuredOutputError, SympyConversionError) as err:
-                if attempt == max_retries:
-                    if failure_logs and isinstance(err, SympyConversionError):
-                        err.notes = f"Prompt:\n{prompt}\n\nLLM output:\n{raw_json}"
-                    raise
-                prompt = self._repair_prompt(prompt, err)  # Reflexion loop
-
+            )
+        else:
+            # already in an event loop: require async usage
+            raise RuntimeError(
+                "Event loop already running; call to_sympy_async instead of to_sympy."
+            )
+        
+        
     # ---------------------------------------------------------------------#
-    # Prompt construction  🔵 ***UPDATED SECTION*** 🔵
+    # Prompt construction
     def _build_prompt(self, latex: str, context: Optional[str]) -> str:
         GOLD_EXAMPLE = r"""
 LaTeX: R_{r}^{\mathrm{val}} = \frac 1 k \sum_{j=1}^k R_{rj}^{\mathrm{val}}
@@ -173,14 +232,14 @@ JSON:
             "### REQUIREMENTS",
             "1. Each string in \"exprs\" must parse with `sympy.parse_expr`.",
             "2. Use Eq(lhs, rhs) — never a bare '='.",
-            "3. Sums/Integrals → Sum(...), Integral(...) — no comprehensions.",
+            "3. Sums/Integrals → Sum(...), Integral(...) — no comprehensions.",
             "4. Bare identifiers (N, Theta, …) stay bare; do *not* quote them.",
             "5. Reserved names N, E, I, pi are symbols unless *called*.",
             "6. For a parameterised operator (\\mathcal{N}_θ(u)) write N_theta(u),",
             "   **never** N(theta)(u).",
             "7. Unknown ops (argmin, relu, …) → plain calls (argmin(...)).",
-            "8. Field \"multiple\" is true iff len(exprs) > 1.",
-            "9. Think step‑by‑step internally; show only the final JSON.",
+            "8. Field \"multiple\" is true iff len(exprs) > 1.",
+            "9. Think step-by-step internally; show only the final JSON.",
             "10. **Flatten every sub-/superscript into the symbol name**:",
             "    • X_{i}      →  X_i",
             "    • W^{out}    →  W_out",
@@ -194,12 +253,14 @@ JSON:
 
     # ---------------------------------------------------------------------#
     # LLM call + envelope handling
-    def _run_llm(self, prompt: str, failure_logs: bool) -> str:
-        call = llm.override(self._mirascope_call, provider=self.provider, model=self.model)
-        reply = call(prompt)
+    async def _run_llm_async(self, prompt: str, failure_logs: bool) -> str:
+        if not self._api_key:
+            raise APIKeyMissingError("Call register_key() first.")
+
+        call = llm.override(self._mirascope_call_async, provider=self.provider, model=self.model)
+        reply = await call(prompt)
         raw = reply.content if hasattr(reply, "content") else reply
 
-        # If OpenAI JSON‑mode blocked the content, let Reflexion handle it
         try:
             maybe = json.loads(raw)
             if isinstance(maybe, dict) and "error" in maybe:
@@ -209,9 +270,8 @@ JSON:
             pass
 
         return raw
-
     # ---------------------------------------------------------------------#
-    # JSON + SymPy validation (unchanged)
+    # JSON + SymPy validation
     def _parse_and_validate(
         self,
         raw_json: str,
@@ -269,7 +329,7 @@ JSON:
         return parsed, data["notes"], multiple
 
     # ---------------------------------------------------------------------#
-    # Reflexion repair prompt (unchanged)
+    # Reflexion repair prompt
     @staticmethod
     def _repair_prompt(prev_prompt: str, err: Exception) -> str:
         return (
