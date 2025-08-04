@@ -22,3 +22,31 @@
 ```bash
 pip install symantex
 ```
+
+## Contributing
+
+To contribute, start by creating and entering a virtual environment (Python 3.10 reccomended)
+
+```bash
+python3.10 -m venv .symnatex && source .symantex/bin/activate
+```
+
+After that, clone the repository and enter the Symantex folder
+
+```bash
+git clone git@github.com:FormuLearn/Symantex.git && cd Symantex
+```
+
+You can then install requirements with:
+
+```bash
+pip install -r requirements.txt
+```
+
+Finally, locally install the library locally with:
+
+```bash
+pip install -e .
+```
+
+Now any changes you make to the library locally will be reflected in your installation.
